@@ -1,0 +1,13 @@
+{
+  "name": "u-epms",
+  "private": true,
+  "version": "2.0.0",
+  "description": "U EPMS - Enterprise Plant Monitoring System (Pure PHP, MySQL/SQLite, TZS)",
+  "scripts": {
+    "dev": "php -S 127.0.0.1:3000 router.php",
+    "start": "php -S 127.0.0.1:3000 router.php",
+    "build": "php init_db.php",
+    "lint": "php -l index.php dashboard.php procurement.php production.php petty_cash.php users.php settings.php audit_logs.php switch_role.php router.php init_db.php config.php includes/db.php includes/auth.php includes/functions.php includes/session.php",
+    "test": "bash tests/e2e_rbac_test.sh"
+  }
+}

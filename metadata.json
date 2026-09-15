@@ -1,0 +1,6 @@
+{
+  "name": "U EPMS - Enterprise Plant Monitoring System",
+  "description": "Role-based enterprise plant monitoring system. Procurement Officers view and approve requisitions; Accountants record petty cash expenses; Admins issue floats and configure the plant; Operators and Admins manage (ban/delete) users and audit the system. All money in TZS. Pure PHP + MySQL/SQLite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

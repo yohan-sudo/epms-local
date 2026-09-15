@@ -1,0 +1,19 @@
+# ---- Secrets & environment ----
+# Never commit real credentials or the APP_KEY encryption key.
+# Copy .env.example to .env on a new machine instead.
+.env
+.env.backup
+
+# ---- Local databases ----
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# ---- OS / editor junk ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+
+# ---- Logs ----
+*.log
