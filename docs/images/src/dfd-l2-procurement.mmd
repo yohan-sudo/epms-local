@@ -1,0 +1,32 @@
+flowchart TB
+    PO["Procurement Officer"]
+    MGR["Manager"]
+    ACC["Accountant"]
+    CEO["CEO (override at any gate)"]
+
+    P41(("4.1<br/>Validate & Price<br/>Submission"))
+    P42(("4.2<br/>Register<br/>PRC-YYYY-NNNN"))
+    P43(("4.3<br/>Manager<br/>Decision"))
+    P44(("4.4<br/>Accountant<br/>Final Decision"))
+    P45(("4.5<br/>Lock / Archive<br/>(immutable)"))
+
+    D1[("D1 users")]
+    D3[("D3 procurement_entries")]
+    D2[("D2 audit_logs")]
+
+    PO -->|"supplier, item, qty, unit cost"| P41
+    P41 -->|"total = qty × cost; ref no."| P42
+    P42 -->|"status = Pending Manager Review"| D3
+    D3 -->|"worklist"| P43
+    MGR -->|"approve + notes / reject + reason"| P43
+    P43 -->|"status = Pending Accountant Review<br/>or Rejected"| D3
+    D3 -->|"worklist"| P44
+    ACC -->|"final approve + notes / reject"| P44
+    P44 -->|"status = Finalized / Rejected"| D3
+    D3 -->|"Finalized record"| P45
+    P45 -->|"read-only forever"| D3
+    P41 & P43 & P44 -->|"events"| D2
+    P41 -.->|"resolve submitter id"| D1
+    P43 & P44 -.->|"resolve approver id"| D1
+    CEO -.->|"may act as Manager or Accountant gate"| P43
+    CEO -.-> P44

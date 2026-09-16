@@ -1,0 +1,66 @@
+erDiagram
+    users ||--o{ procurement_entries : "submitted_by / manager_approved_by / accountant_approved_by"
+    users ||--o{ daily_reports : "supervisor_id"
+    users ||--o{ petty_cash_issuances : "issued_by (CEO) / issued_to (Accountant)"
+    users ||--o{ petty_cash_expenses : "approved_by"
+    users ||--o{ audit_logs : "actor_id (SET NULL on delete)"
+
+    processes ||--o{ machines : "process_id"
+    machines ||--o{ daily_reports : "machine_id"
+    daily_reports ||--o| process_reject_logs : "report_id"
+    processes ||--o{ process_reject_logs : "process_id"
+    petty_cash_issuances ||--o{ petty_cash_expenses : "issuance_id"
+
+    users {
+        int id PK
+        varchar username UK
+        varchar password_hash "bcrypt"
+        varchar role "CEO|Manager|Accountant|Procurement Officer"
+        varchar status "Active|Banned"
+    }
+    processes {
+        int id PK
+        varchar name "1 Rounding … 5 Cups … 6 Packaging/Sewing"
+    }
+    machines {
+        int id PK
+        varchar code UK "R1 R2 S1 S2 K1 O1"
+        int process_id FK
+    }
+    daily_reports {
+        int id PK
+        date report_date
+        varchar shift
+        int units_produced "Units Processed (gross)"
+        int good_units "DERIVED: units - rejects"
+    }
+    process_reject_logs {
+        int report_id FK
+        int process_id FK
+        int partial_reject_count "reworkable"
+        int total_reject_count "scrapped"
+    }
+    procurement_entries {
+        int id PK
+        varchar reference_no UK "PRC-YYYY-NNNN"
+        varchar status "Pending Manager Review > Pending Accountant Review > Finalized"
+        decimal total_cost "qty x unit_cost"
+    }
+    petty_cash_issuances {
+        int id PK
+        varchar voucher_no UK "PV-YYYY-NNNN"
+        decimal amount "800,000-7,000,000 TZS"
+        varchar status "Active|Closed"
+    }
+    petty_cash_expenses {
+        int issuance_id FK
+        decimal amount
+        varchar receipt_no
+    }
+    audit_logs {
+        int actor_id FK "nullable"
+        varchar action
+        varchar entity_type
+        varchar entity_id
+        text details
+    }

@@ -1,0 +1,15 @@
+erDiagram
+    direction LR
+
+    PROCESSES ||--o{ MACHINES : "groups"
+    MACHINES ||--o{ DAILY_REPORTS : "produced on"
+    DAILY_REPORTS ||--o| PROCESS_REJECT_LOGS : "breaks down into"
+    PROCESSES ||--o{ PROCESS_REJECT_LOGS : "occurred at"
+
+    PETTY_CASH_ISSUANCES ||--o{ PETTY_CASH_EXPENSES : "spent through"
+
+    USERS ||--o{ AUDIT_LOGS : "acted in"
+    USERS ||--o{ PROCUREMENT_ENTRIES : "submits and approves x3"
+    USERS ||--o{ DAILY_REPORTS : "supervises"
+    USERS ||--o{ PETTY_CASH_ISSUANCES : "issues / holds"
+    USERS ||--o{ PETTY_CASH_EXPENSES : "records"
