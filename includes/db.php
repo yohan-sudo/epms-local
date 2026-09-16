@@ -86,7 +86,7 @@ function uepms_migrate(PDO $db): void {
 
 /**
  * One-time convenience backfill: accounts still on the demo default password
- * ('factory123') get their vault copy populated so Admin/Operator can view it.
+ * ('factory123') get their vault copy populated so the CEO can view it.
  * Accounts with a changed password are left NULL (not recoverable) by design.
  * Self-contained: runs before functions.php defines encryptPassword().
  */

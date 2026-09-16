@@ -1,16 +1,16 @@
 <?php
 /**
  * U EPMS - Petty Cash Float & Expense Ledger
- * - Admin: issues new petty cash floats (the ONLY role that can).
+ * - CEO (owner): issues new petty cash floats (the ONLY role that can).
  * - Accountant: records expenses against existing floats (cannot issue).
  * - Manager: records expenses.
- * - System Operator: read-only.
  */
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
+require_once __DIR__ . '/components/filter_bar.php';
 
-requireRole(['System Operator', 'Admin', 'Manager', 'Accountant']);
+requireRole(['CEO', 'Manager', 'Accountant']);
 
 $pageTitle = 'Petty Cash Management';
 $activeNav = 'petty_cash';
@@ -21,30 +21,33 @@ $currentUserName = $_SESSION['user_name'];
 
 // Handle POST actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($currentUserRole === 'System Operator') {
-        setFlash('error', 'System Operator has read-only inspection access. Records cannot be created.');
-        header('Location: /petty_cash.php');
-        exit;
-    }
-
     $action = $_POST['action'] ?? '';
 
-    // 1. Issue New Petty Cash Voucher (Admin ONLY - Accountants may NOT issue float)
+    // 1. Issue New Petty Cash Voucher (CEO ONLY - Accountants may NOT issue float)
     if ($action === 'issue_float') {
-        if ($currentUserRole !== 'Admin') {
-            setFlash('error', 'Unauthorized: Accountants cannot issue new floats. Recording expenses is your authority. Only the Admin can issue new petty cash floats.');
+        if ($currentUserRole !== 'CEO') {
+            setFlash('error', 'Unauthorized: Only the CEO can issue new petty cash floats. Recording expenses is the Accountant and Manager authority.');
             header('Location: /petty_cash.php');
             exit;
         }
 
-        $issuedTo   = (int)$_POST['issued_to'];
-        $amount     = (float)$_POST['amount'];
-        $purpose    = trim($_POST['purpose'] ?? 'General shop floor emergency float');
-        $issuedDate = $_POST['issued_date'] ?? date('Y-m-d');
+        $errors = [];
+        $issuedTo   = field_int($errors, 'issued_to', 'Designated custodian', 1) ?? 0;
+        $amount     = field_float($errors, 'amount', 'Float amount', 800000, 7000000) ?? 0;
+        $purpose    = field_text($errors, 'purpose', 'Operational purpose', true, 5, 255) ?? '';
+        $issuedDate = field_date($errors, 'issued_date', 'Date of issuance', true, true) ?? date('Y-m-d');
         $voucherNo  = 'PCV-' . date('Y') . '-' . str_pad((string)rand(100, 999), 3, '0', STR_PAD_LEFT);
 
-        if ($amount <= 0 || $issuedTo <= 0) {
-            setFlash('error', 'Please provide a valid custodian and positive cash amount.');
+        if ($errors) {
+            redirectWithErrors('/petty_cash.php?action=issue', $errors);
+        }
+
+        // The ONLY permitted float holder is an active Accountant
+        $holderStmt = $db->prepare("SELECT role, status, name FROM users WHERE id = :id");
+        $holderStmt->execute([':id' => $issuedTo]);
+        $holder = $holderStmt->fetch();
+        if (!$holder || $holder['role'] !== 'Accountant' || $holder['status'] !== 'Active') {
+            setFlash('error', 'Only an active Accountant can be designated as a petty cash float holder.');
             header('Location: /petty_cash.php?action=issue');
             exit;
         }
@@ -62,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ':idate'   => $issuedDate,
         ]);
 
-        logAudit($db, 'PETTY_CASH_ISSUED', 'PETTY_CASH', $voucherNo, "Admin {$currentUserName} issued float of " . formatMoney($amount) . " under voucher {$voucherNo}");
+        logAudit($db, 'PETTY_CASH_ISSUED', 'PETTY_CASH', $voucherNo, "CEO {$currentUserName} issued float of " . formatMoney($amount) . " under voucher {$voucherNo}");
         setFlash('success', "Petty cash voucher {$voucherNo} for " . formatMoney($amount) . " issued successfully.");
         header('Location: /petty_cash.php');
         exit;
@@ -76,17 +79,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-        $issuanceId  = (int)$_POST['issuance_id'];
-        $expenseDate = $_POST['expense_date'] ?? date('Y-m-d');
-        $category    = trim($_POST['category'] ?? 'Shop Consumables');
-        $description = trim($_POST['description'] ?? '');
-        $amount      = (float)$_POST['amount'];
-        $receiptNo   = trim($_POST['receipt_no'] ?? 'N/A');
+        $errors = [];
+        $issuanceId  = field_int($errors, 'issuance_id', 'Float voucher', 1) ?? 0;
+        $expenseDate = field_date($errors, 'expense_date', 'Expense date', true, true) ?? date('Y-m-d');
+        $category    = field_choice($errors, 'category', 'Expense category', [
+            'Hardware & Fasteners', 'Shop Consumables', 'Equipment Maintenance',
+            'Logistics & Freight', 'Safety & PPE',
+        ]) ?? '';
+        $description = field_text($errors, 'description', 'Expense description', true, 3, 255) ?? '';
+        $amount      = field_float($errors, 'amount', 'Expense amount', 100) ?? 0;
+        $receiptNo   = field_text($errors, 'receipt_no', 'Receipt / tax invoice number', true, 3, 50) ?? '';
 
-        if ($issuanceId <= 0 || $amount <= 0 || empty($description)) {
-            setFlash('error', 'Please provide a valid voucher, positive expense amount, and description.');
-            header('Location: /petty_cash.php?action=expense');
-            exit;
+        if ($errors) {
+            redirectWithErrors('/petty_cash.php?action=expense', $errors);
         }
 
         // Check voucher balance limit
@@ -139,8 +144,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// Fetch vouchers and calculate remaining balances
-$vouchers = $db->query("
+// ---- Search & date-range filter (shared contract: q, from, to) ----
+$filter = read_filter_params();
+foreach ($filter['errors'] as $fe) {
+    setFlash('warning', $fe);
+}
+
+$voucherSql = "";
+$voucherArgs = [];
+if ($filter['from'] !== '') { $voucherSql .= " AND i.issued_date >= :v_from"; $voucherArgs[':v_from'] = $filter['from']; }
+if ($filter['to'] !== '') { $voucherSql .= " AND i.issued_date <= :v_to"; $voucherArgs[':v_to'] = $filter['to']; }
+if ($filter['q'] !== '') {
+    $voucherSql .= " AND (i.voucher_no LIKE :vq1 OR i.purpose LIKE :vq2 OR ut.name LIKE :vq3 OR ub.name LIKE :vq4 OR CAST(i.amount AS CHAR) LIKE :vq5)";
+    $like = '%' . $filter['q'] . '%';
+    for ($i = 1; $i <= 5; $i++) { $voucherArgs[":vq{$i}"] = $like; }
+}
+
+// Fetch vouchers with filters
+$stmtVouchers = $db->prepare("
     SELECT i.*,
            u_to.name AS custodian_name,
            u_by.name AS issuer_name,
@@ -149,23 +170,41 @@ $vouchers = $db->query("
     LEFT JOIN users u_to ON i.issued_to = u_to.id
     LEFT JOIN users u_by ON i.issued_by = u_by.id
     LEFT JOIN petty_cash_expenses e ON e.issuance_id = i.id
+    WHERE 1=1 " . $voucherSql . "
     GROUP BY i.id
-    ORDER BY i.id DESC
-")->fetchAll();
+    ORDER BY i.issued_date DESC, i.id DESC
+");
+foreach ($voucherArgs as $k => $v) { $stmtVouchers->bindValue($k, $v); }
+$stmtVouchers->execute();
+$vouchers = $stmtVouchers->fetchAll();
 
-// Fetch expense transactions
-$expenses = $db->query("
+$expenseSql = "";
+$expenseArgs = [];
+if ($filter['from'] !== '') { $expenseSql .= " AND e.expense_date >= :e_from"; $expenseArgs[':e_from'] = $filter['from']; }
+if ($filter['to'] !== '') { $expenseSql .= " AND e.expense_date <= :e_to"; $expenseArgs[':e_to'] = $filter['to']; }
+if ($filter['q'] !== '') {
+    $expenseSql .= " AND (e.description LIKE :eq1 OR e.category LIKE :eq2 OR e.receipt_no LIKE :eq3 OR i.voucher_no LIKE :eq4 OR u.name LIKE :eq5 OR CAST(e.amount AS CHAR) LIKE :eq6)";
+    $like = '%' . $filter['q'] . '%';
+    for ($i = 1; $i <= 6; $i++) { $expenseArgs[":eq{$i}"] = $like; }
+}
+
+// Fetch expense transactions with filters
+$stmtExpenses = $db->prepare("
     SELECT e.*,
            i.voucher_no,
            u.name AS approver_name
     FROM petty_cash_expenses e
     JOIN petty_cash_issuances i ON e.issuance_id = i.id
     LEFT JOIN users u ON e.approved_by = u.id
-    ORDER BY e.id DESC
-")->fetchAll();
+    WHERE 1=1 " . $expenseSql . "
+    ORDER BY e.expense_date DESC, e.id DESC
+");
+foreach ($expenseArgs as $k => $v) { $stmtExpenses->bindValue($k, $v); }
+$stmtExpenses->execute();
+$expenses = $stmtExpenses->fetchAll();
 
-// Users eligible for receiving floats (active staff)
-$custodians = $db->query("SELECT * FROM users WHERE status = 'Active' ORDER BY name ASC")->fetchAll();
+// Eligible float holders: active Accountants only
+$custodians = $db->query("SELECT * FROM users WHERE role = 'Accountant' AND status = 'Active' ORDER BY name ASC")->fetchAll();
 
 // Financial Totals
 $totalIssued = 0;
@@ -178,7 +217,7 @@ foreach ($vouchers as $v) {
 }
 $netFloat = max(0, $totalIssued - $totalExpensed);
 
-$showIssueForm = isset($_GET['action']) && $_GET['action'] === 'issue' && $currentUserRole === 'Admin';
+$showIssueForm = isset($_GET['action']) && $_GET['action'] === 'issue' && $currentUserRole === 'CEO';
 $showExpenseForm = isset($_GET['action']) && $_GET['action'] === 'expense' && in_array($currentUserRole, ['Accountant', 'Manager'], true);
 
 include __DIR__ . '/components/header.php';
@@ -191,7 +230,7 @@ include __DIR__ . '/components/header.php';
             <p class="page-subtitle">Floor disbursement accounting, custodian voucher reconciliation, and receipt verification (all amounts in TZS)</p>
         </div>
         <div style="display:flex; gap:10px; align-items:center;">
-            <?php if ($currentUserRole === 'Admin'): ?>
+            <?php if ($currentUserRole === 'CEO'): ?>
                 <a href="/petty_cash.php?action=issue" class="btn btn-primary">+ Issue New Float</a>
             <?php endif; ?>
             <?php if (in_array($currentUserRole, ['Accountant', 'Manager'], true)): ?>
@@ -203,6 +242,15 @@ include __DIR__ . '/components/header.php';
     </div>
 
     <?php displayFlash(); ?>
+
+    <?php render_filter_bar([
+        'action'       => '/petty_cash.php',
+        'q'            => $filter['q'],
+        'from'         => $filter['from'],
+        'to'           => $filter['to'],
+        'placeholder'  => 'Search voucher, purpose, custodian, category, receipt...',
+        'reportsKey'   => 'petty_cash_floats',
+    ]); ?>
 
     <!-- KPI Balance Summary -->
     <div class="stats-grid">
@@ -218,29 +266,29 @@ include __DIR__ . '/components/header.php';
         <div class="stat-card">
             <div class="stat-header">
                 <span class="stat-title">Total Floats Issued</span>
-                <span class="badge badge-primary"><?= count($vouchers) ?> Vouchers</span>
+                <span class="badge badge-primary"><?= count($vouchers) ?> Vouchers<?= ($filter['from'] !== '' || $filter['to'] !== '' || $filter['q'] !== '') ? ' (filtered)' : '' ?></span>
             </div>
             <div class="stat-value"><?= formatMoney($totalIssued) ?></div>
-            <div class="stat-desc">Admin disbursements to plant custodians</div>
+            <div class="stat-desc">CEO disbursements to plant custodians</div>
         </div>
 
         <div class="stat-card">
             <div class="stat-header">
                 <span class="stat-title">Reconciled Expenses</span>
-                <span class="badge badge-info"><?= count($expenses) ?> Receipts</span>
+                <span class="badge badge-info"><?= count($expenses) ?> Receipts<?= ($filter['from'] !== '' || $filter['to'] !== '' || $filter['q'] !== '') ? ' (filtered)' : '' ?></span>
             </div>
             <div class="stat-value"><?= formatMoney($totalExpensed) ?></div>
             <div class="stat-desc">Documented with formal vendor receipts</div>
         </div>
     </div>
 
-    <!-- Issue New Float Form (Admin only) -->
+    <!-- Issue New Float Form (CEO only) -->
     <?php if ($showIssueForm): ?>
         <div class="card" style="border: 2px solid var(--primary-border);">
             <div class="card-header">
                 <div>
                     <h3 class="card-title">Issue New Petty Cash Float Voucher</h3>
-                    <p class="card-subtitle">Admin authority: disburse a cash float to a designated custodian</p>
+                    <p class="card-subtitle">CEO authority: disburse TZS 800,000 &ndash; 7,000,000 to the Accountant (sole float holder)</p>
                 </div>
                 <a href="/petty_cash.php" class="btn btn-secondary btn-sm">&times; Cancel</a>
             </div>
@@ -249,29 +297,34 @@ include __DIR__ . '/components/header.php';
                 <input type="hidden" name="action" value="issue_float">
                 <div class="form-grid">
                     <div class="form-group">
-                        <label for="issued_to">Designated Custodian (Recipient) *</label>
+                        <label for="issued_to">Float Holder (Accountant only) *</label>
                         <select id="issued_to" name="issued_to" class="form-control" required>
                             <?php foreach ($custodians as $c): ?>
                                 <option value="<?= (int)$c['id'] ?>">
-                                    <?= htmlspecialchars($c['name']) ?> (<?= htmlspecialchars($c['role']) ?>)
+                                    <?= htmlspecialchars($c['name']) ?> (Accountant)
                                 </option>
                             <?php endforeach; ?>
                         </select>
+                        <span class="form-help">Petty cash floats are held exclusively by the Accountant.</span>
                     </div>
 
                     <div class="form-group">
                         <label for="amount">Float Amount (TZS) *</label>
-                        <input type="number" id="amount" name="amount" min="1" step="1" value="1000000" class="form-control" required>
+                        <input type="number" id="amount" name="amount" min="800000" max="7000000" step="1" value="1000000" class="form-control" required
+                               data-required-error="Float amount is required." data-min-error="Minimum float is TZS 800,000." data-max-error="Maximum single float is TZS 7,000,000.">
+                        <span class="form-help">Allowed range: TZS 800,000 &ndash; TZS 7,000,000.</span>
                     </div>
 
                     <div class="form-group">
                         <label for="issued_date">Date of Issuance *</label>
-                        <input type="date" id="issued_date" name="issued_date" value="<?= date('Y-m-d') ?>" class="form-control" required>
+                        <input type="date" id="issued_date" name="issued_date" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>" class="form-control" required
+                               data-required-error="Date of issuance is required." data-max-error="Issuance date cannot be in the future.">
                     </div>
 
                     <div class="form-group" style="grid-column: 1 / -1;">
                         <label for="purpose">Operational Purpose &amp; Scope *</label>
-                        <input type="text" id="purpose" name="purpose" value="Shift operations emergency parts & local maintenance float" class="form-control" required>
+                        <input type="text" id="purpose" name="purpose" value="Shift operations emergency parts & local maintenance float" class="form-control" required
+                               maxlength="255" minlength="5" data-required-error="Operational purpose is required." data-plaintext>
                     </div>
                 </div>
 
@@ -314,7 +367,8 @@ include __DIR__ . '/components/header.php';
 
                     <div class="form-group">
                         <label for="expense_date">Expense Date *</label>
-                        <input type="date" id="expense_date" name="expense_date" value="<?= date('Y-m-d') ?>" class="form-control" required>
+                        <input type="date" id="expense_date" name="expense_date" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>" class="form-control" required
+                               data-required-error="Expense date is required." data-max-error="Expense date cannot be in the future.">
                     </div>
 
                     <div class="form-group">
@@ -330,17 +384,20 @@ include __DIR__ . '/components/header.php';
 
                     <div class="form-group">
                         <label for="amount">Expense Amount (TZS) *</label>
-                        <input type="number" id="amount" name="amount" min="1" step="1" value="50000" class="form-control" required>
+                        <input type="number" id="amount" name="amount" min="100" max="50000000" step="1" value="50000" class="form-control" required
+                               data-required-error="Expense amount is required." data-min-error="Minimum expense is TZS 100." data-max-error="Maximum single expense is TZS 50,000,000.">
                     </div>
 
                     <div class="form-group">
                         <label for="receipt_no">Receipt / Tax Invoice Number *</label>
-                        <input type="text" id="receipt_no" name="receipt_no" placeholder="e.g. REC-99201" value="REC-<?= rand(10000, 99999) ?>" class="form-control" required>
+                        <input type="text" id="receipt_no" name="receipt_no" placeholder="e.g. REC-99201" value="REC-<?= rand(10000, 99999) ?>" class="form-control" required
+                               minlength="3" maxlength="50" data-required-error="Receipt number is required." data-plaintext>
                     </div>
 
                     <div class="form-group" style="grid-column: 1 / -1;">
                         <label for="description">Expense Item Description *</label>
-                        <input type="text" id="description" name="description" placeholder="e.g. Replacement hydraulic solenoid fuse and terminal blocks" class="form-control" required>
+                        <input type="text" id="description" name="description" placeholder="e.g. Replacement hydraulic solenoid fuse and terminal blocks" class="form-control" required
+                               minlength="3" maxlength="255" data-required-error="Expense description is required." data-plaintext>
                     </div>
                 </div>
 
@@ -377,7 +434,7 @@ include __DIR__ . '/components/header.php';
                 </thead>
                 <tbody>
                     <?php if (empty($vouchers)): ?>
-                        <tr><td colspan="8" class="empty-state">No vouchers currently active.</td></tr>
+                        <tr><td colspan="8" class="empty-state">No vouchers match the current search / date filter.</td></tr>
                     <?php else: ?>
                         <?php foreach ($vouchers as $v):
                             $rem = (float)$v['amount'] - (float)$v['total_spent'];
@@ -433,7 +490,7 @@ include __DIR__ . '/components/header.php';
                 </thead>
                 <tbody>
                     <?php if (empty($expenses)): ?>
-                        <tr><td colspan="7" class="empty-state">No expenses recorded yet.</td></tr>
+                        <tr><td colspan="7" class="empty-state">No expenses match the current search / date filter.</td></tr>
                     <?php else: ?>
                         <?php foreach ($expenses as $e): ?>
                             <tr>

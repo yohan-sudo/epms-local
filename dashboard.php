@@ -9,7 +9,7 @@ require_once __DIR__ . '/includes/functions.php';
 
 requireAuth();
 
-// Procurement Officers are restricted exclusively to the requisition portal
+// Procurement Officers are restricted exclusively to the procurement records portal
 if (($_SESSION['user_role'] ?? '') === 'Procurement Officer') {
     commitSessionAndRedirect('/procurement.php');
 }
@@ -21,8 +21,8 @@ $currentUserRole = $_SESSION['user_role'];
 $currentUserId = $_SESSION['user_id'];
 $currentUserName = $_SESSION['user_name'];
 
-// Audit trail is restricted to Admin and System Operator
-$canViewAudit = in_array($currentUserRole, ['Admin', 'System Operator'], true);
+// Audit trail is restricted to the CEO (owner)
+$canViewAudit = $currentUserRole === 'CEO';
 
 // Operational KPIs
 // 1. Production Stats
@@ -53,11 +53,35 @@ $issuanceSum = (float)$db->query("SELECT COALESCE(SUM(amount), 0) FROM petty_cas
 $expenseSum = (float)$db->query("SELECT COALESCE(SUM(amount), 0) FROM petty_cash_expenses")->fetchColumn();
 $pettyCashBalance = max(0, $issuanceSum - $expenseSum);
 
-// 3. Procurement Pipeline
+// 3. Procurement Records Pipeline
+$pendingManagerCount = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE status IN ('Pending Manager Review', 'Pending Approval')")->fetchColumn();
+$pendingAccountantCount = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE status = 'Pending Accountant Review'")->fetchColumn();
 $pendingPoCount = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE status NOT IN ('Finalized', 'Rejected')")->fetchColumn();
 $finalizedPoTotal = (float)$db->query("SELECT COALESCE(SUM(total_cost), 0) FROM procurement_entries WHERE status = 'Finalized'")->fetchColumn();
+$rejectedPoCount = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE status = 'Rejected'")->fetchColumn();
 
-// Requisitions (visible to every non-procurement role)
+// Procurement records awaiting MY stage of approval (role-specific worklist)
+$myApprovalStage = null;
+if ($currentUserRole === 'Manager') {
+    $myApprovalStage = "p.status IN ('Pending Manager Review', 'Pending Approval')";
+} elseif ($currentUserRole === 'Accountant') {
+    $myApprovalStage = "p.status = 'Pending Accountant Review'";
+}
+$myApprovals = [];
+if ($myApprovalStage !== null) {
+    $stmtMy = $db->prepare("
+        SELECT p.*, u.name as submitter_name
+        FROM procurement_entries p
+        LEFT JOIN users u ON p.submitted_by = u.id
+        WHERE {$myApprovalStage}
+        ORDER BY p.date ASC, p.id ASC
+        LIMIT 6
+    ");
+    $stmtMy->execute();
+    $myApprovals = $stmtMy->fetchAll();
+}
+
+// Recent procurement records (visible to every non-procurement role)
 $recentPos = $db->query("
     SELECT p.*, u.name as submitter_name
     FROM procurement_entries p
@@ -78,7 +102,7 @@ $recentReports = $db->query("
     LIMIT 4
 ")->fetchAll();
 
-// Recent Audit Logs (Admin & System Operator only)
+// Recent Audit Logs (CEO only)
 $recentAudits = [];
 if ($canViewAudit) {
     $recentAudits = $db->query("
@@ -105,12 +129,9 @@ include __DIR__ . '/components/header.php';
                 <a href="/petty_cash.php?action=expense" class="btn btn-secondary">+ Record Expense</a>
             <?php elseif ($currentUserRole === 'Accountant'): ?>
                 <a href="/petty_cash.php?action=expense" class="btn btn-primary">+ Record Expense</a>
-            <?php elseif ($currentUserRole === 'Admin'): ?>
+            <?php elseif ($currentUserRole === 'CEO'): ?>
                 <a href="/petty_cash.php?action=issue" class="btn btn-primary">+ Issue Petty Cash Float</a>
                 <a href="/users.php" class="btn btn-secondary">Manage Users</a>
-            <?php elseif ($currentUserRole === 'System Operator'): ?>
-                <a href="/users.php" class="btn btn-primary">Manage Users</a>
-                <a href="/audit_logs.php" class="btn btn-secondary">Audit Trail</a>
             <?php endif; ?>
         </div>
     </div>
@@ -155,24 +176,98 @@ include __DIR__ . '/components/header.php';
         <div class="stat-card">
             <div class="stat-header">
                 <span class="stat-title">Procurement Queue</span>
-                <span class="badge badge-info"><?= $pendingPoCount ?> Pending</span>
+                <span class="badge badge-info"><?= $pendingPoCount ?> Open Records</span>
             </div>
             <div class="stat-value"><?= formatMoney($finalizedPoTotal) ?></div>
             <div class="stat-desc">
-                Finalized capital and raw material spend (TZS)
+                Finalized spend (TZS) &bull; <?= $pendingManagerCount ?> awaiting Manager &bull; <?= $pendingAccountantCount ?> awaiting Accountant
             </div>
         </div>
     </div>
 
+    <!-- My Procurement Approvals (Manager & Accountant only) -->
+    <?php if ($myApprovalStage !== null): ?>
+    <div class="card" style="<?= empty($myApprovals) ? 'margin-bottom:24px;' : 'border:2px solid var(--warning); margin-bottom:24px;' ?>">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">
+                    <?php if ($currentUserRole === 'Manager'): ?>
+                        Procurement Awaiting Your Approval
+                    <?php else: ?>
+                        Procurement Awaiting Your Final Approval
+                    <?php endif; ?>
+                </h3>
+                <p class="card-subtitle">
+                    <?php if ($currentUserRole === 'Manager'): ?>
+                        Submitted by the Procurement Officer &mdash; your approval forwards each record to the Accountant
+                    <?php else: ?>
+                        Manager-approved records &mdash; you are the final approver; approval locks the record
+                    <?php endif; ?>
+                </p>
+            </div>
+            <a href="/procurement.php" class="btn btn-secondary btn-sm">Open Procurement Records &rarr;</a>
+        </div>
+
+        <?php if (empty($myApprovals)): ?>
+            <div class="empty-state" style="padding:18px;">
+                <p style="margin:0; color:var(--text-muted);">&#10003; Nothing is waiting for your decision right now.</p>
+            </div>
+        <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Ref #</th>
+                        <th>Supplier / Item</th>
+                        <th>Total Cost</th>
+                        <th>Status</th>
+                        <th>Submitted By</th>
+                        <th>Decision</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($myApprovals as $po): ?>
+                        <tr>
+                            <td class="mono"><strong><?= htmlspecialchars($po['reference_no']) ?></strong></td>
+                            <td>
+                                <div style="font-weight:600;"><?= htmlspecialchars($po['supplier']) ?></div>
+                                <div style="font-size:12px; color:var(--text-muted);"><?= htmlspecialchars($po['item_name']) ?></div>
+                            </td>
+                            <td><strong><?= formatMoney((float)$po['total_cost']) ?></strong></td>
+                            <td><?= getProcurementStatusBadge($po['status']) ?></td>
+                            <td><?= htmlspecialchars($po['submitter_name'] ?? '&mdash;') ?></td>
+                            <td>
+                                <div style="display:flex; gap:6px; align-items:center;">
+                                    <form method="POST" action="/procurement.php" style="display:inline;">
+                                        <input type="hidden" name="action" value="<?= $currentUserRole === 'Manager' ? 'manager_decision' : 'accountant_decision' ?>">
+                                        <input type="hidden" name="po_id" value="<?= (int)$po['id'] ?>">
+                                        <input type="hidden" name="notes" value="">
+                                        <button type="submit" name="decision" value="approve" class="btn btn-success btn-sm"
+                                                onclick="return confirm('Approve <?= htmlspecialchars($po['reference_no']) ?> for <?= formatMoney((float)$po['total_cost']) ?>?');">&#10003; Approve</button>
+                                        <button type="submit" name="decision" value="reject" class="btn btn-danger btn-sm"
+                                                onclick="return confirm('Reject <?= htmlspecialchars($po['reference_no']) ?>? A rejection reason will be recorded.');">&#10007;</button>
+                                    </form>
+                                    <a href="/procurement.php?view_id=<?= (int)$po['id'] ?>" class="btn btn-secondary btn-sm">Inspect</a>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
+
     <div style="display:grid; grid-template-columns: 2fr 1fr; gap:24px; margin-bottom: 24px;">
-        <!-- Left: Requisitions Pipeline -->
+        <!-- Left: Recent Procurement Records -->
         <div class="card" style="margin-bottom:0;">
             <div class="card-header">
                 <div>
-                    <h3 class="card-title">Purchase Requisitions</h3>
-                    <p class="card-subtitle">Current status of vendor purchase requests</p>
+                    <h3 class="card-title">Recent Procurement Records</h3>
+                    <p class="card-subtitle">Officer submits &rarr; Manager approves &rarr; Accountant finalizes &rarr; locked</p>
                 </div>
-                <a href="/procurement.php" class="btn btn-secondary btn-sm">View All &rarr;</a>
+                <a href="/procurement.php" class="btn btn-secondary btn-sm">Open Records &rarr;</a>
             </div>
 
             <div class="table-responsive">
@@ -188,7 +283,7 @@ include __DIR__ . '/components/header.php';
                     </thead>
                     <tbody>
                         <?php if (empty($recentPos)): ?>
-                            <tr><td colspan="5" class="empty-state">No requisitions currently submitted.</td></tr>
+                            <tr><td colspan="5" class="empty-state">No procurement records submitted yet.</td></tr>
                         <?php else: ?>
                             <?php foreach ($recentPos as $po): ?>
                                 <tr>
@@ -228,19 +323,18 @@ include __DIR__ . '/components/header.php';
                         <ul style="padding-left:18px; margin:0;">
                             <li>Record expenses against petty cash floats</li>
                             <li>Review and reconcile expense receipts</li>
-                            <li>Cannot issue new floats (Admin authority)</li>
+                            <li>Cannot issue new floats (CEO authority)</li>
                         </ul>
-                    <?php elseif ($currentUserRole === 'Admin'): ?>
+                    <?php elseif ($currentUserRole === 'CEO'): ?>
                         <ul style="padding-left:18px; margin:0;">
                             <li>Issue new petty cash floats</li>
                             <li>Manage machinery, processes &amp; plant settings</li>
                             <li>Manage users (ban &amp; delete) and view audit trail</li>
                         </ul>
-                    <?php elseif ($currentUserRole === 'System Operator'): ?>
+                    <?php elseif ($currentUserRole === 'Procurement Officer'): ?>
                         <ul style="padding-left:18px; margin:0;">
-                            <li>View everything (read-only inspection)</li>
-                            <li>Manage users: ban, reactivate &amp; delete</li>
-                            <li>Full immutable audit trail access</li>
+                            <li>Submit procurement records of what has been procured</li>
+                            <li>Records route to the Manager, then the Accountant (final approver)</li>
                         </ul>
                     <?php endif; ?>
                 </div>
@@ -310,12 +404,12 @@ include __DIR__ . '/components/header.php';
     </div>
 
     <?php if ($canViewAudit): ?>
-    <!-- Live Audit Trail Log (Admin & System Operator only) -->
+    <!-- Live Audit Trail Log (CEO only) -->
     <div class="card">
         <div class="card-header">
             <div>
                 <h3 class="card-title">System Activity &amp; Audit Trail</h3>
-                <p class="card-subtitle">Immutable chronological operational event logs (restricted to Admin &amp; System Operator)</p>
+                <p class="card-subtitle">Immutable chronological operational event logs (restricted to the CEO)</p>
             </div>
             <a href="/audit_logs.php" class="btn btn-secondary btn-sm">Full Audit Trail &rarr;</a>
         </div>

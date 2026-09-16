@@ -30,7 +30,7 @@ if ($user) {
     setFlash('success', "Switched active user to " . htmlspecialchars($user['name']) . " (" . htmlspecialchars($user['role']) . "). Permissions updated.");
 
     $referer = $_SERVER['HTTP_REFERER'] ?? '/dashboard.php';
-    // Procurement Officer is strictly scoped to the requisition portal
+    // Procurement Officer is strictly scoped to the procurement records portal
     if ($user['role'] === 'Procurement Officer') {
         $referer = '/procurement.php';
     } elseif (str_contains($referer, 'switch_role.php')) {

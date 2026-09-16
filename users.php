@@ -1,14 +1,14 @@
 <?php
 /**
  * U EPMS - User Accounts & Access Management
- * Operator and Admin: create users, ban/unban, hard-delete, and manage (view/change) passwords.
+ * CEO (owner): create users, ban/unban, hard-delete, and manage (view/change) passwords.
  * Pure PHP 8.2 & Plain HTML5/CSS3 (Zero Frameworks)
  */
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
 
-requireRole(['System Operator', 'Admin']);
+requireRole(['CEO']);
 
 $pageTitle = 'User Accounts & Access Management';
 $activeNav = 'users';
@@ -23,28 +23,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 1. Add New User
     if ($action === 'create_user') {
-        $name     = trim($_POST['name'] ?? '');
-        $username = trim($_POST['username'] ?? '');
-        $role     = $_POST['role'] ?? 'Procurement Officer';
-        $password = $_POST['password'] ?? 'factory123';
+        $allowedRoles = ['Procurement Officer', 'Manager', 'Accountant', 'CEO'];
 
-        $allowedRoles = ['Procurement Officer', 'Manager', 'Accountant', 'Admin'];
-        if ($currentUserRole === 'System Operator') {
-            $allowedRoles[] = 'System Operator';
-        }
-        if (!in_array($role, $allowedRoles, true)) {
-            setFlash('error', 'Invalid role selection.');
-            header('Location: /users.php?action=new');
-            exit;
+        $errors = [];
+        $name     = field_text($errors, 'name', 'Full name', true, 2, 100);
+        $username = field_username($errors, 'username');
+        $role     = field_choice($errors, 'role', 'Role', $allowedRoles);
+        $password = field_password($errors, 'password');
+
+        if ($errors) {
+            redirectWithErrors('/users.php?action=new', $errors);
         }
 
-        if (empty($name) || empty($username) || empty($password)) {
-            setFlash('error', 'All fields are required to register a user.');
-            header('Location: /users.php?action=new');
-            exit;
-        }
-
-        // Check unique username
         $check = $db->prepare("SELECT COUNT(*) FROM users WHERE username = :u");
         $check->execute([':u' => $username]);
         if ($check->fetchColumn() > 0) {
@@ -106,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // 3. Delete User Completely (Operator and Admin only)
+    // 3. Delete User Completely (CEO only)
     if ($action === 'delete_user') {
         $targetId = (int)$_POST['target_user_id'];
 
@@ -145,15 +135,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // 4. Change Password (Operator and Admin only)
+    // 4. Change Password (CEO only)
     if ($action === 'change_password') {
-        $targetId    = (int)$_POST['target_user_id'];
-        $newPassword = (string)($_POST['new_password'] ?? '');
+        $targetId    = (int)($_POST['target_user_id'] ?? 0);
 
-        if (strlen($newPassword) < 6) {
-            setFlash('error', 'New password must be at least 6 characters.');
-            header('Location: /users.php');
-            exit;
+        $errors = [];
+        $newPassword = field_password($errors, 'new_password', 'New password');
+        if ($errors) {
+            redirectWithErrors('/users.php', $errors);
         }
 
         $uStmt = $db->prepare("SELECT * FROM users WHERE id = :id");
@@ -178,7 +167,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // 5. View (Reveal) Password (Operator and Admin only) - always audit logged
+    // 5. View (Reveal) Password (CEO only) - always audit logged
     if ($action === 'view_password') {
         $targetId = (int)$_POST['target_user_id'];
 
@@ -256,30 +245,31 @@ include __DIR__ . '/components/header.php';
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="name">Full Name *</label>
-                        <input type="text" id="name" name="name" required placeholder="e.g. Sarah Jenkins" class="form-control">
+                        <input type="text" id="name" name="name" required placeholder="e.g. Sarah Jenkins" class="form-control"
+                               maxlength="100" data-plaintext data-required-error="Full name is required.">
                     </div>
 
                     <div class="form-group">
                         <label for="username">Username *</label>
-                        <input type="text" id="username" name="username" required placeholder="e.g. jenkins_s" class="form-control">
+                        <input type="text" id="username" name="username" required placeholder="e.g. jenkins_s" class="form-control"
+                               data-pattern-error="Use only letters, numbers, dots or underscores (3-32 characters).">
                     </div>
 
                     <div class="form-group">
                         <label for="role">Assigned System Role *</label>
                         <select id="role" name="role" class="form-control" required>
-                            <option value="Procurement Officer">Procurement Officer (View &amp; Approve Requisitions)</option>
-                            <option value="Manager">Manager (Shift Reports &amp; Expenses)</option>
-                            <option value="Accountant">Accountant (Record Petty Cash Expenses)</option>
-                            <option value="Admin">Admin (Issue Floats, Settings, Users)</option>
-                            <?php if ($currentUserRole === 'System Operator'): ?>
-                                <option value="System Operator">System Operator (Full System Control)</option>
-                            <?php endif; ?>
+                            <option value="Procurement Officer">Procurement Officer (Submit Procurement Records)</option>
+                            <option value="Manager">Manager (Shift Reports, Expenses &amp; First Procurement Approval)</option>
+                            <option value="Accountant">Accountant (Expenses &amp; Final Procurement Approval)</option>
+                            <option value="CEO">CEO (Owner: Floats, Settings, Users)</option>
                         </select>
                     </div>
 
                     <div class="form-group">
                         <label for="password">Temporary Password *</label>
-                        <input type="password" id="password" name="password" required value="factory123" class="form-control">
+                        <input type="password" id="password" name="password" required value="factory123" class="form-control"
+                               minlength="6" maxlength="64" data-required-error="Temporary password is required.">
+                        <span class="form-help">6-64 characters, no spaces. The user can sign in with it immediately.</span>
                     </div>
                 </div>
 
@@ -308,8 +298,9 @@ include __DIR__ . '/components/header.php';
 
                 <div class="form-group">
                     <label for="new_password">New Password *</label>
-                    <input type="text" id="new_password" name="new_password" required minlength="6" class="form-control" placeholder="Minimum 6 characters" autocomplete="new-password">
-                    <span class="form-help">Minimum 6 characters. You can reveal it later with the &quot;View Password&quot; button.</span>
+                    <input type="text" id="new_password" name="new_password" required minlength="6" maxlength="64" class="form-control" placeholder="Minimum 6 characters" autocomplete="new-password"
+                           data-required-error="New password is required.">
+                    <span class="form-help">Minimum 6 characters, no spaces. You can reveal it later with the &quot;View Password&quot; button.</span>
                 </div>
 
                 <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
@@ -345,8 +336,7 @@ include __DIR__ . '/components/header.php';
                 <tbody>
                     <?php foreach ($users as $u):
                         $roleClass = match($u['role']) {
-                            'System Operator' => 'badge-primary',
-                            'Admin' => 'badge-danger',
+                            'CEO' => 'badge-danger',
                             'Manager' => 'badge-warning',
                             'Accountant' => 'badge-success',
                             'Procurement Officer' => 'badge-info',
@@ -432,33 +422,29 @@ include __DIR__ . '/components/header.php';
                         <th>Procurement Officer</th>
                         <th>Manager</th>
                         <th>Accountant</th>
-                        <th>Admin</th>
-                        <th>System Operator</th>
+                        <th>CEO</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td><strong>View Purchase Requisitions</strong></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
-                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
-                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
-                    </tr>
-                    <tr>
-                        <td><strong>Approve / Reject Requisitions</strong></td>
+                        <td><strong>Submit Procurement Records</strong></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Sole authority</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>First Procurement Approval</strong></td>
+                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
+                        <td><span style="color:var(--success); font-weight:700;">&#10003; On dashboard</span></td>
+                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Draft / Edit Requisitions</strong></td>
-                        <td><span style="color:var(--danger); font-weight:700;">&#10007; No (view &amp; approve only)</span></td>
+                        <td><strong>Final Procurement Approval</strong></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
+                        <td><span style="color:var(--success); font-weight:700;">&#10003; Final approver (locks record)</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                     </tr>
                     <tr>
@@ -467,14 +453,12 @@ include __DIR__ . '/components/header.php';
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--danger); font-weight:700;">&#10007; No (expenses only)</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
-                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                     </tr>
                     <tr>
                         <td><strong>Record Expenses Against Float</strong></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
-                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                     </tr>
                     <tr>
@@ -483,14 +467,19 @@ include __DIR__ . '/components/header.php';
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Machinery &amp; Process Config</strong></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
+                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
+                        <td><span style="color:var(--text-subtle);">&mdash;</span></td>
+                        <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                     </tr>
                     <tr>
                         <td><strong>Audit Trail Access</strong></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                     </tr>
                     <tr>
@@ -499,7 +488,6 @@ include __DIR__ . '/components/header.php';
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                     </tr>
                     <tr>
                         <td><strong>View / Change User Passwords</strong></td>
@@ -507,15 +495,13 @@ include __DIR__ . '/components/header.php';
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--text-subtle);">&mdash;</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Full</span></td>
                     </tr>
                     <tr>
                         <td><strong>View Operational Data</strong></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Requisitions only</span></td>
+                        <td><span style="color:var(--success); font-weight:700;">&#10003; Procurement records only</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
                         <td><span style="color:var(--success); font-weight:700;">&#10003; Yes</span></td>
-                        <td><span style="color:var(--success); font-weight:700;">&#10003; Everything (read-only)</span></td>
                     </tr>
                 </tbody>
             </table>

@@ -27,7 +27,7 @@ function requireAuth(): void {
 
 /**
  * Enforces Role-Based Access Control matrix.
- * Allowed roles: 'System Operator', 'Admin', 'Manager', 'Accountant', 'Procurement Officer'
+ * Allowed roles: 'CEO', 'Manager', 'Accountant', 'Procurement Officer'
  */
 function requireRole(array $allowedRoles): void {
     requireAuth();

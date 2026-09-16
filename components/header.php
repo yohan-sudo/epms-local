@@ -24,8 +24,7 @@ if ($db) {
 }
 
 $roleBadgeClass = match($currentUserRole) {
-    'System Operator' => 'badge-primary',
-    'Admin' => 'badge-danger',
+    'CEO' => 'badge-danger',
     'Manager' => 'badge-warning',
     'Accountant' => 'badge-success',
     'Procurement Officer' => 'badge-info',
@@ -39,6 +38,7 @@ $roleBadgeClass = match($currentUserRole) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= htmlspecialchars($pageTitle) ?> - <?= htmlspecialchars(APP_NAME) ?></title>
     <link rel="stylesheet" href="/assets/css/style.css">
+    <script src="/assets/js/validate.js" defer></script>
     <script>
     (function() {
         const urlParams = new URLSearchParams(window.location.search);

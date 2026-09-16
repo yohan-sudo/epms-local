@@ -1,15 +1,14 @@
 <?php
 /**
  * U EPMS - Machinery & Plant Process Configuration
- * Admin: full write authority. System Operator: read-only inspection
- * (write authority retained ONLY over Administration data - users).
+ * CEO (owner): full write authority.
  * Pure PHP 8.2 & Plain HTML5/CSS3 (Zero Frameworks)
  */
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
 
-requireRole(['System Operator', 'Admin']);
+requireRole(['CEO']);
 
 $pageTitle = 'Machinery & Process Configuration';
 $activeNav = 'settings';
@@ -18,10 +17,10 @@ $currentUserRole = $_SESSION['user_role'];
 $currentUserId = $_SESSION['user_id'];
 $currentUserName = $_SESSION['user_name'];
 
-// Handle POST: Add Machine or Process (Admin only)
+// Handle POST: Add Machine or Process (CEO only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($currentUserRole !== 'Admin') {
-        setFlash('error', 'System Operator has read-only access to machinery configuration. Operational modifications are restricted to Admin.');
+    if ($currentUserRole !== 'CEO') {
+        setFlash('error', 'Operational modifications are restricted to the CEO.');
         header('Location: /settings.php');
         exit;
     }
@@ -30,15 +29,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 1. Add Machine
     if ($action === 'add_machine') {
-        $code      = strtoupper(trim($_POST['code'] ?? ''));
-        $name      = trim($_POST['name'] ?? '');
-        $processId = (int)($_POST['process_id'] ?? 1);
-        $status    = $_POST['status'] ?? 'Operational';
+        $allowedStatuses = ['Operational', 'Maintenance', 'Offline'];
 
-        if (empty($code) || empty($name)) {
-            setFlash('error', 'Machine code and descriptive name are required.');
-            header('Location: /settings.php');
-            exit;
+        $errors = [];
+        $code      = field_text($errors, 'code', 'Asset code', true, 2, 20) ?? '';
+        $code      = strtoupper($code);
+        $name      = field_text($errors, 'name', 'Machine description', true, 3, 100) ?? '';
+        $processId = field_int($errors, 'process_id', 'Associated process', 1) ?? 0;
+        $status    = field_choice($errors, 'status', 'Operational status', $allowedStatuses) ?? 'Operational';
+
+        if ($errors) {
+            redirectWithErrors('/settings.php', $errors);
         }
 
         // Check duplicate code
@@ -64,8 +65,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 2. Update Machine Status
     if ($action === 'update_machine_status') {
-        $machineId = (int)$_POST['machine_id'];
-        $newStatus = $_POST['status'];
+        $machineId = (int)($_POST['machine_id'] ?? 0);
+
+        $errors = [];
+        $newStatus = field_choice($errors, 'status', 'Machine status', ['Operational', 'Maintenance', 'Offline']) ?? '';
+        if ($machineId <= 0) {
+            $errors[] = '• A valid machine must be selected.';
+        }
+        if ($errors) {
+            redirectWithErrors('/settings.php', $errors);
+        }
 
         $stmt = $db->prepare("UPDATE machines SET status = :s WHERE id = :id");
         $stmt->execute([':s' => $newStatus, ':id' => $machineId]);
@@ -78,13 +87,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 3. Add Process
     if ($action === 'add_process') {
-        $name = trim($_POST['name'] ?? '');
-        $desc = trim($_POST['description'] ?? '');
+        $errors = [];
+        $name = field_text($errors, 'name', 'Process name', true, 3, 100) ?? '';
+        $desc = field_text($errors, 'description', 'Process description', false, 0, 500) ?? '';
 
-        if (empty($name)) {
-            setFlash('error', 'Process name is required.');
-            header('Location: /settings.php');
-            exit;
+        if ($errors) {
+            redirectWithErrors('/settings.php', $errors);
         }
 
         $stmt = $db->prepare("INSERT INTO processes (name, description, status) VALUES (:n, :d, 'Active')");
@@ -160,7 +168,7 @@ include __DIR__ . '/components/header.php';
                                 <td><?= htmlspecialchars($m['process_name']) ?></td>
                                 <td><span class="badge <?= $statusClass ?>"><?= htmlspecialchars($m['status']) ?></span></td>
                                 <td>
-                                    <?php if ($currentUserRole === 'Admin'): ?>
+                                    <?php if ($currentUserRole === 'CEO'): ?>
                                         <form method="POST" action="/settings.php" style="display:flex; gap:6px;">
                                             <input type="hidden" name="action" value="update_machine_status">
                                             <input type="hidden" name="machine_id" value="<?= (int)$m['id'] ?>">
@@ -181,9 +189,9 @@ include __DIR__ . '/components/header.php';
             </div>
         </div>
 
-        <!-- Right: Register Machine Form / Operator Notice -->
+        <!-- Right: Register Machine Form (CEO only) -->
         <div class="card" style="margin-bottom:0;">
-            <?php if ($currentUserRole === 'Admin'): ?>
+            <?php if ($currentUserRole === 'CEO'): ?>
                 <div class="card-header">
                     <h3 class="card-title">+ Add Equipment</h3>
                 </div>
@@ -192,12 +200,14 @@ include __DIR__ . '/components/header.php';
                     <input type="hidden" name="action" value="add_machine">
                     <div class="form-group">
                         <label for="code">Asset Code *</label>
-                        <input type="text" id="code" name="code" placeholder="e.g. MILL-03" required class="form-control">
+                        <input type="text" id="code" name="code" placeholder="e.g. MILL-03" required class="form-control"
+                               minlength="2" maxlength="20" pattern="[A-Za-z0-9-]{2,20}" data-required-error="Asset code is required." data-plaintext data-pattern-error="Asset code allows only letters, numbers and hyphens (2-20 characters).">
                     </div>
 
                     <div class="form-group">
                         <label for="name">Machine Description *</label>
-                        <input type="text" id="name" name="name" placeholder="e.g. Mazak Quick Turn CNC Lathe" required class="form-control">
+                        <input type="text" id="name" name="name" placeholder="e.g. Mazak Quick Turn CNC Lathe" required class="form-control"
+                               minlength="3" maxlength="100" data-required-error="Machine description is required." data-plaintext>
                     </div>
 
                     <div class="form-group">
@@ -222,15 +232,6 @@ include __DIR__ . '/components/header.php';
                         Register Equipment
                     </button>
                 </form>
-            <?php else: ?>
-                <div class="card-header">
-                    <h3 class="card-title">Operator Inspection Mode</h3>
-                </div>
-                <div class="alert alert-info" style="margin-bottom:0;">
-                    <p style="font-size:13px; line-height:1.5;">
-                        <strong>Operator view:</strong> you can inspect machinery and plant processes. Modifications are restricted to Admin. Your write access is limited to user accounts.
-                    </p>
-                </div>
             <?php endif; ?>
         </div>
     </div>
@@ -270,7 +271,7 @@ include __DIR__ . '/components/header.php';
         </div>
 
         <div class="card" style="margin-bottom:0;">
-            <?php if ($currentUserRole === 'Admin'): ?>
+            <?php if ($currentUserRole === 'CEO'): ?>
                 <div class="card-header">
                     <h3 class="card-title">+ New Process</h3>
                 </div>
@@ -279,12 +280,13 @@ include __DIR__ . '/components/header.php';
                     <input type="hidden" name="action" value="add_process">
                     <div class="form-group">
                         <label for="p_name">Process Name *</label>
-                        <input type="text" id="p_name" name="name" placeholder="e.g. Ultrasonic Cleaning" required class="form-control">
+                        <input type="text" id="p_name" name="name" placeholder="e.g. Ultrasonic Cleaning" required class="form-control"
+                               minlength="3" maxlength="100" data-required-error="Process name is required." data-plaintext>
                     </div>
 
                     <div class="form-group">
                         <label for="p_desc">Description &amp; Specifications</label>
-                        <textarea id="p_desc" name="description" rows="3" placeholder="Technical process parameters..." class="form-control"></textarea>
+                        <textarea id="p_desc" name="description" rows="3" placeholder="Technical process parameters..." class="form-control" maxlength="500"></textarea>
                     </div>
 
                     <button type="submit" class="btn btn-primary" style="width:100%; margin-top:8px;">
@@ -296,7 +298,7 @@ include __DIR__ . '/components/header.php';
                     <h3 class="card-title">Process Specifications</h3>
                 </div>
                 <p style="font-size:13px; color:var(--text-muted); line-height:1.5;">
-                    Production flow stages and machine tolerances are standardized by plant engineering. Process alterations are controlled under Admin approval.
+                    Production flow stages and machine tolerances are standardized by plant engineering. Process alterations are controlled under CEO approval.
                 </p>
             <?php endif; ?>
         </div>

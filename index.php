@@ -8,42 +8,30 @@ initAppSession();
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/functions.php';
 
-// Handle Direct Quick-Login / Role selector from login screen
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['quick_login_id'])) {
-    $userId = (int)$_POST['quick_login_id'];
-    $stmt = $db->prepare("SELECT * FROM users WHERE id = :id");
-    $stmt->execute([':id' => $userId]);
-    $user = $stmt->fetch();
-
-    if ($user) {
-        if ($user['status'] === 'Banned') {
-            setFlash('error', "Authentication Failed: Account '{$user['name']}' is suspended/banned by the System Operator.");
-            commitSessionAndRedirect('/index.php');
-        }
-
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['user_name'] = $user['name'];
-        $_SESSION['user_username'] = $user['username'];
-        $_SESSION['user_role'] = $user['role'];
-        $_SESSION['user_status'] = $user['status'];
-
-        logAudit($db, 'USER_LOGIN', 'AUTH', $user['id'], "User {$user['name']} logged in via direct role authentication");
-        $destination = ($user['role'] === 'Procurement Officer') ? '/procurement.php' : '/dashboard.php';
-        commitSessionAndRedirect($destination);
-    }
-}
-
-// Handle Traditional Username/Password Login
+// Handle Username/Password Login
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'])) {
-    $username = trim($_POST['username']);
-    $password = $_POST['password'] ?? '';
+    $username = trim((string)($_POST['username'] ?? ''));
+    $password = (string)($_POST['password'] ?? '');
+
+    $loginErrors = [];
+    if ($username === '' || $password === '') {
+        $loginErrors[] = 'Both username and password are required.';
+    } elseif (!preg_match('/^[A-Za-z0-9_.]{3,32}$/', $username)) {
+        $loginErrors[] = 'Username format is invalid (3-32 letters, numbers, dots or underscores).';
+    } elseif (strlen($password) < 6 || strlen($password) > 64 || preg_match('/\s/', $password)) {
+        $loginErrors[] = 'Password length is invalid (6-64 characters, no spaces).';
+    }
+    if ($loginErrors) {
+        setFlash('error', implode(' ', $loginErrors));
+        commitSessionAndRedirect('/index.php');
+    }
 
     $stmt = $db->prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(:u) OR LOWER(name) = LOWER(:u)");
     $stmt->execute([':u' => $username]);
     $user = $stmt->fetch();
 
     if ($user && ($user['status'] === 'Banned')) {
-        setFlash('error', "Account Suspended: Access denied for {$user['name']}. Contact System Operator.");
+        setFlash('error', "Account Suspended: Access denied for {$user['name']}. Contact the CEO.");
         commitSessionAndRedirect('/index.php');
     }
 
@@ -58,13 +46,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'])) {
         $destination = ($user['role'] === 'Procurement Officer') ? '/procurement.php' : '/dashboard.php';
         commitSessionAndRedirect($destination);
     } else {
-        setFlash('error', "Invalid username or password. You may use 1-click role logins below.");
+        setFlash('error', "Invalid username or password.");
         commitSessionAndRedirect('/index.php');
     }
 }
 
-// Fetch all users for the 1-click switcher
-$allUsers = $db->query("SELECT * FROM users ORDER BY id ASC")->fetchAll();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -73,6 +59,7 @@ $allUsers = $db->query("SELECT * FROM users ORDER BY id ASC")->fetchAll();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sign In - <?= htmlspecialchars(APP_NAME) ?></title>
     <link rel="stylesheet" href="/assets/css/style.css">
+<script src="/assets/js/validate.js" defer></script>
 </head>
 <body style="background-color: #0f172a;">
 
@@ -113,13 +100,12 @@ $allUsers = $db->query("SELECT * FROM users ORDER BY id ASC")->fetchAll();
         <form method="POST" action="/index.php">
             <div class="form-group">
                 <label for="username">Username</label>
-                <input type="text" id="username" name="username" class="form-control" value="gimeno" required autocomplete="username">
+                <input type="text" id="username" name="username" class="form-control" required autocomplete="username" placeholder="Enter your username">
             </div>
 
             <div class="form-group">
                 <label for="password">Password</label>
-                <input type="password" id="password" name="password" class="form-control" value="factory123" required autocomplete="current-password">
-                <span class="form-help">Default demo password for all accounts: <code>factory123</code></span>
+                <input type="password" id="password" name="password" class="form-control" required autocomplete="current-password" placeholder="Enter your password">
             </div>
 
             <button type="submit" class="btn btn-primary" style="width: 100%; padding: 10px; margin-top: 8px;">
@@ -127,33 +113,9 @@ $allUsers = $db->query("SELECT * FROM users ORDER BY id ASC")->fetchAll();
             </button>
         </form>
 
-        <div style="margin: 24px 0 16px; display: flex; align-items: center; text-align: center; color: var(--text-subtle); font-size: 12px;">
-            <div style="flex: 1; height: 1px; background: var(--border-color);"></div>
-            <span style="padding: 0 12px; font-weight: 600; text-transform: uppercase;">Or Instant 1-Click Role Login</span>
-            <div style="flex: 1; height: 1px; background: var(--border-color);"></div>
-        </div>
-
-        <!-- 1-Click Role Access Grid -->
-        <div class="demo-account-grid">
-            <?php foreach ($allUsers as $u): ?>
-                <form method="POST" action="/index.php" style="margin:0;">
-                    <input type="hidden" name="quick_login_id" value="<?= (int)$u['id'] ?>">
-                    <button type="submit" class="demo-user-btn" <?= $u['status'] === 'Banned' ? 'style="border-color:#fca5a5;background:#fef2f2;"' : '' ?>>
-                        <div class="demo-user-name">
-                            <?= htmlspecialchars($u['name']) ?>
-                            <?php if ($u['status'] === 'Banned'): ?>
-                                <span style="color:#dc2626;font-size:10px;">(BANNED)</span>
-                            <?php endif; ?>
-                        </div>
-                        <div class="demo-user-role"><?= htmlspecialchars($u['role']) ?></div>
-                    </button>
-                </form>
-            <?php endforeach; ?>
-        </div>
-
         <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color); font-size: 11.5px; color: var(--text-subtle); line-height: 1.6;">
             <strong>Enterprise Plant Monitoring System</strong><br>
-            Manage production, procurement requisitions, and petty cash. All monetary values are recorded in Tanzanian Shillings (<?= APP_CURRENCY ?>).
+            Manage production, procurement records, and petty cash. All monetary values are recorded in Tanzanian Shillings (<?= APP_CURRENCY ?>).
         </div>
     </div>
 </div>
@@ -176,15 +138,19 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Interactive button loading state for instant visual feedback
+    // (only when the shared validation engine passes the form)
     document.querySelectorAll('form').forEach(function(form) {
         form.addEventListener('submit', function(e) {
+            if (e.defaultPrevented) return;
+            if (typeof window.uepmsFormValid === 'function' && !window.uepmsFormValid(form)) {
+                e.preventDefault();
+                return;
+            }
             const btn = form.querySelector('button[type="submit"]');
             if (btn) {
                 btn.style.opacity = '0.7';
                 btn.style.pointerEvents = 'none';
-                if (!btn.classList.contains('demo-user-btn')) {
-                    btn.innerText = 'Authenticating...';
-                }
+                btn.innerText = 'Signing in...';
             }
         });
     });

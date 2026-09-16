@@ -67,10 +67,13 @@ CREATE TABLE `machines` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------
--- Procurement requisitions
--- Statuses used by the app:
---   'Pending Manager Review' | 'Pending Accountant Review'
---   'Approved - Pending Admin Decision' | 'Finalized' | 'Rejected'
+-- Procurement records
+-- Lifecycle statuses used by the app:
+--   'Pending Manager Review'    -> Procurement Officer submitted; awaiting Manager approval
+--   'Pending Accountant Review' -> Manager approved; awaiting Accountant FINAL approval
+--   'Finalized'                 -> Accountant approved (closed & locked)
+--   'Rejected'                  -> rejected by Manager or Accountant (closed)
+--   'Pending Approval'          -> legacy status kept readable
 -- ---------------------------------------------------------------------
 CREATE TABLE `procurement_entries` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -83,7 +86,7 @@ CREATE TABLE `procurement_entries` (
   `unit` VARCHAR(30) NOT NULL,
   `unit_cost` DECIMAL(14,2) NOT NULL DEFAULT 0,
   `total_cost` DECIMAL(14,2) NOT NULL DEFAULT 0,
-  `status` VARCHAR(40) NOT NULL DEFAULT 'Pending Manager Review',
+  `status` VARCHAR(40) NOT NULL DEFAULT 'Pending Approval',
   `manager_approved_by` INT UNSIGNED NULL,
   `manager_approved_at` DATETIME NULL,
   `manager_notes` TEXT NULL,
@@ -182,47 +185,56 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- bcrypt hash of 'factory123'
 -- password_encrypted: AES-256-GCM vault copy of 'factory123' (decrypted via APP_KEY in .env)
 -- ---------------------------------------------------------------------
+-- Roles: CEO (owner), Manager, Accountant, Procurement Officer.
 INSERT INTO `users` (`id`, `name`, `username`, `password_hash`, `password_encrypted`, `role`, `status`, `created_at`) VALUES
-(1, 'GIMENO', 'gimeno', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'System Operator', 'Active', '2026-01-10 08:30:00'),
-(2, 'BRIGHTON MMARI', 'brighton_mmari', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Admin', 'Active', '2026-01-10 09:00:00'),
-(3, 'GLORY GEORGE', 'glory_george', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Manager', 'Active', '2026-01-15 10:15:00'),
-(4, 'SWAUMU MKOMWA', 'swaumu_mkomwa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Accountant', 'Active', '2026-01-18 11:45:00'),
-(5, 'GLORIA MGASSA', 'gloria_mgassa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Active', '2026-02-01 14:20:00'),
-(6, 'Victor Diaz', 'victor_diaz', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Banned', '2026-03-01 16:00:00');
+(1, 'BRIGHTON MMARI', 'brighton_mmari', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'CEO', 'Active', '2026-01-10 09:00:00'),
+(2, 'GLORY GEORGE', 'glory_george', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Manager', 'Active', '2026-01-15 10:15:00'),
+(3, 'SWAUMU MKOMWA', 'swaumu_mkomwa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Accountant', 'Active', '2026-01-18 11:45:00'),
+(4, 'GLORIA MGASSA', 'gloria_mgassa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Active', '2026-02-01 14:20:00'),
+(5, 'Victor Diaz', 'victor_diaz', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Banned', '2026-03-01 16:00:00');
 
+-- Production pipeline, first stage to last (broom stick plant):
+--   1. Rounding (machines R1, R2, ...) -> 2. Sanding (S1, ...) ->
+--   3. P.V.C (K1, ...) -> 4. P.V.C (O1, ...) -> 5. Cups (by hand; finished
+--   broom sticks are counted here) -> 6. Packaging / Sewing (bundles).
 INSERT INTO `processes` (`id`, `name`, `description`, `status`) VALUES
-(1, 'Stamping & Heavy Pressing', 'Cold rolled steel blanking and hydraulic forming', 'Active'),
-(2, 'Precision CNC Machining', 'Multi-axis milling, drilling, and high-tolerance turning', 'Active'),
-(3, 'Surface Treatment & Powder Coating', 'Degreasing, electrostatic spray, and infrared thermal curing', 'Active'),
-(4, 'Final Assembly & QA Testing', 'Modular component integration and pneumatic pressure checks', 'Active');
+(1, 'Rounding', 'First stage: sticks are rounded on R-series rounding machines (R1, R2, ...)', 'Active'),
+(2, 'Sanding', 'Second stage: surface smoothing on S-series sanding machines (S1, S2, ...)', 'Active'),
+(3, 'P.V.C (K Line)', 'P.V.C stage run on K-series machines (K1, ...)', 'Active'),
+(4, 'P.V.C (O Line)', 'P.V.C stage run on O-series machines (O1, ...)', 'Active'),
+(5, 'Cups', 'Done by hand. This is where the finished products (broom sticks) are counted.', 'Active'),
+(6, 'Packaging / Sewing', 'Done by machine or hand - products are packaged into bundles at this point.', 'Active');
 
 INSERT INTO `machines` (`id`, `code`, `name`, `process_id`, `status`) VALUES
-(101, 'HYD-01', 'Komatsu 250T Hydraulic Press', 1, 'Operational'),
-(102, 'CNC-04', 'Haas VF-4SS 4-Axis Vertical Mill', 2, 'Operational'),
-(103, 'COAT-02', 'Nordson Automatic Powder Line', 3, 'Maintenance'),
-(104, 'ASSY-01', 'Pneumatic Robotic Assembly Cell 1', 4, 'Operational'),
-(105, 'PRESS-02', 'AIDA 160T Mechanical Stamping Press', 1, 'Operational');
+(1, 'R1', 'Rounding Machine R1', 1, 'Operational'),
+(2, 'R2', 'Rounding Machine R2', 1, 'Operational'),
+(3, 'S1', 'Sanding Machine S1', 2, 'Operational'),
+(4, 'S2', 'Sanding Machine S2', 2, 'Maintenance'),
+(5, 'K1', 'P.V.C K-Line Machine K1', 3, 'Operational'),
+(6, 'O1', 'P.V.C O-Line Machine O1', 4, 'Operational'),
+(7, 'HAND-01', 'Cups Station (Manual Hand Work)', 5, 'Operational'),
+(8, 'SEW-01', 'Packaging & Sewing Machine', 6, 'Operational');
 
 INSERT INTO `procurement_entries`
 (`reference_no`, `submitted_by`, `supplier`, `item_name`, `category`, `quantity`, `unit`, `unit_cost`, `total_cost`, `status`, `manager_approved_by`, `manager_approved_at`, `manager_notes`, `accountant_approved_by`, `accountant_approved_at`, `accountant_notes`, `admin_approved_by`, `admin_approved_at`, `admin_notes`, `rejection_reason`, `date`) VALUES
-('REQ-2026-001', 5, 'Apex Industrial Steel Ltd.', 'Cold Rolled Steel Coils (Grade 1018)', 'Raw Material', 15.50, 'Tons', 3150000.00, 48825000.00, 'Finalized', 3, '2026-03-02 11:15:00', 'Material specifications verified against Q2 production roadmap.', 4, '2026-03-03 09:30:00', 'Budget allocation confirmed under Capital Expenditures.', 2, '2026-03-03 16:45:00', 'Purchase authorized. Expedited delivery approved.', NULL, '2026-03-01'),
-('REQ-2026-002', 5, 'Vanguard Cutting Tools Corp', 'Carbide End Mills & Drill Inserts (Pack of 50)', 'Tooling', 8.00, 'Sets', 1060000.00, 8480000.00, 'Approved - Pending Admin Decision', 3, '2026-03-08 14:00:00', 'Essential for CNC machine line continuity.', 4, '2026-03-09 10:20:00', 'Operating account budget verified.', NULL, NULL, NULL, NULL, '2026-03-07'),
-('REQ-2026-003', 5, 'Total Lubricants & Hydraulics', 'ISO VG 46 Hydraulic Oil (200L Drum)', 'Consumables', 6.00, 'Drums', 960000.00, 5760000.00, 'Pending Accountant Review', 3, '2026-03-12 16:10:00', 'Approved for scheduled 500-hour hydraulic maintenance.', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-12'),
-('REQ-2026-004', 5, 'ElectroCoat Systems', 'Polyester Powder Paint - Gloss Safety Yellow', 'Raw Material', 500.00, 'kg', 21500.00, 10750000.00, 'Pending Manager Review', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-14');
+('PRC-2026-001', 4, 'Apex Bristle & Plastic Ltd.', 'P.V.C Bristle Granules (Grade A)', 'Raw Material', 15.50, 'Tons', 3150000.00, 48825000.00, 'Finalized', 2, '2026-03-02 11:15:00', 'Material specifications verified against Q2 production plan.', 3, '2026-03-03 09:30:00', 'Final approval: budget confirmed under Capital Expenditures.', NULL, NULL, NULL, NULL, '2026-03-01'),
+('PRC-2026-002', 4, 'Vanguard Packaging Corp', 'Sewing Twine & Bundle Wire (Pack of 50)', 'Tooling', 8.00, 'Sets', 1060000.00, 8480000.00, 'Pending Accountant Review', 2, '2026-03-08 14:00:00', 'Essential for the packaging/sewing stage continuity.', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-07'),
+('PRC-2026-003', 4, 'Total Lubricants & Hydraulics', 'ISO VG 46 Hydraulic Oil (200L Drum)', 'Consumables', 6.00, 'Drums', 960000.00, 5760000.00, 'Pending Manager Review', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-12'),
+('PRC-2026-004', 4, 'ElectroCoat Systems', 'P.V.C Coating Compound - Safety Yellow', 'Raw Material', 500.00, 'kg', 21500.00, 10750000.00, 'Pending Manager Review', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-14');
 
 INSERT INTO `daily_reports` (`id`, `report_date`, `shift`, `supervisor_id`, `machine_id`, `units_produced`, `good_units`, `supervisor_notes`, `created_at`) VALUES
-(1, '2026-03-13', 'Morning (06:00 - 14:00)', 3, 101, 1450, 1390, 'High yield run on outer chassis bracket forming. Die wear monitored on flange radius.', '2026-03-13 14:15:00'),
-(2, '2026-03-13', 'Afternoon (14:00 - 22:00)', 3, 102, 380, 362, 'CNC batch finished ahead of schedule. Tool 3 replaced at mid-shift after tool wear alarm.', '2026-03-13 22:10:00'),
-(3, '2026-03-14', 'Morning (06:00 - 14:00)', 3, 104, 520, 508, 'Final assembly cycle stable. Minor pneumatic connector seal rework performed on 8 units.', '2026-03-14 14:05:00');
+(1, '2026-03-13', 'Morning (06:00 - 14:00)', 2, 1, 1450, 1390, 'Rounding stage run on R1. Stick ends rounded cleanly; die wear monitored.', '2026-03-13 14:15:00'),
+(2, '2026-03-13', 'Afternoon (14:00 - 22:00)', 2, 3, 1380, 1341, 'Sanding stage on S1 finished ahead of schedule. Abrasive belt replaced at mid-shift.', '2026-03-13 22:10:00'),
+(3, '2026-03-14', 'Morning (06:00 - 14:00)', 2, 7, 520, 508, 'Cups stage (by hand): finished broom sticks counted. Minor rework on 8 sticks.', '2026-03-14 14:05:00');
 
 INSERT INTO `process_reject_logs` (`report_id`, `process_id`, `partial_reject_count`, `total_reject_count`, `reject_reason`, `root_cause`) VALUES
-(1, 1, 45, 15, 'Burr formation & Edge thinning', 'Upper punch edge rounding during sheet draw stroke'),
-(2, 2, 12, 6, 'Dimensional tolerance drift (+0.04mm)', 'Thermal expansion on spindle cooling jacket'),
-(3, 4, 8, 4, 'Fastener torque anomaly', 'Air pressure drop on pneumatic torque wrench line');
+(1, 1, 45, 15, 'Uneven rounding & end splitting', 'Worn rounding cutter on R1 feed head'),
+(2, 2, 12, 6, 'Rough surface patches after sanding', 'Glazed abrasive belt; replaced mid-shift'),
+(3, 5, 8, 4, 'Broom stick count mismatch at cups stage', 'Hand-counting slip between cups stations');
 
 INSERT INTO `petty_cash_issuances` (`id`, `voucher_no`, `issued_to`, `issued_by`, `amount`, `purpose`, `status`, `issued_date`) VALUES
-(1, 'PCV-2026-001', 3, 2, 1500000.00, 'Shift operations emergency parts & local maintenance float', 'Active', '2026-03-01'),
-(2, 'PCV-2026-002', 5, 2, 800000.00, 'Courier logistics, urgent customs clearances, and sample freight', 'Active', '2026-03-05');
+(1, 'PCV-2026-001', 2, 1, 1500000.00, 'Shift operations emergency parts & local maintenance float', 'Active', '2026-03-01'),
+(2, 'PCV-2026-002', 4, 1, 800000.00, 'Courier logistics, urgent supplies, and sample freight', 'Active', '2026-03-05');
 
 INSERT INTO `petty_cash_expenses` (`issuance_id`, `expense_date`, `category`, `description`, `amount`, `receipt_no`, `approved_by`) VALUES
 (1, '2026-03-03', 'Hardware & Fasteners', 'Emergency M8 Grade 8.8 Hex Bolts & Spring Washers', 355000.00, 'REC-44912', 4),
@@ -231,6 +243,6 @@ INSERT INTO `petty_cash_expenses` (`issuance_id`, `expense_date`, `category`, `d
 (2, '2026-03-06', 'Logistics & Freight', 'Same-day courier dispatch for metallurgical sample testing', 360000.00, 'DHL-88910', 4);
 
 INSERT INTO `audit_logs` (`actor_id`, `action`, `entity_type`, `entity_id`, `details`, `timestamp`) VALUES
-(1, 'SYSTEM_BOOTSTRAP', 'DATABASE', 'SCHEMA', 'Database schema initialized and baseline manufacturing records seeded (currency: TZS).', '2026-03-01 08:00:00'),
-(2, 'PROCUREMENT_FINALIZED', 'PROCUREMENT', 'REQ-2026-001', 'Admin BRIGHTON MMARI authorized final procurement order REQ-2026-001 (TZS 48,825,000.00).', '2026-03-03 16:45:00'),
-(2, 'PETTY_CASH_ISSUED', 'PETTY_CASH', 'PCV-2026-001', 'Admin BRIGHTON MMARI issued TZS 1,500,000.00 petty cash float to GLORY GEORGE.', '2026-03-01 09:15:00');
+(1, 'SYSTEM_BOOTSTRAP', 'DATABASE', 'SCHEMA', 'Database schema initialized and baseline broom stick plant records seeded (currency: TZS).', '2026-03-01 08:00:00'),
+(3, 'PROCUREMENT_FINALIZED', 'PROCUREMENT', 'PRC-2026-001', 'Accountant SWAUMU MKOMWA gave final approval to procurement record PRC-2026-001 (TZS 48,825,000.00).', '2026-03-03 09:30:00'),
+(1, 'PETTY_CASH_ISSUED', 'PETTY_CASH', 'PCV-2026-001', 'CEO BRIGHTON MMARI issued TZS 1,500,000.00 petty cash float to GLORY GEORGE.', '2026-03-01 09:15:00');
