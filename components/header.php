@@ -12,17 +12,6 @@ $currentUserId = $_SESSION['user_id'] ?? 0;
 $currentUserRole = $_SESSION['user_role'] ?? 'Guest';
 $currentUserName = $_SESSION['user_name'] ?? 'Guest';
 
-// Build the role switcher list dynamically from the database
-$switcherUsers = [];
-global $db;
-if ($db) {
-    try {
-        $switcherUsers = $db->query("SELECT id, name, role, status FROM users ORDER BY id ASC")->fetchAll();
-    } catch (Exception $e) {
-        $switcherUsers = [];
-    }
-}
-
 $roleBadgeClass = match($currentUserRole) {
     'CEO' => 'badge-danger',
     'Manager' => 'badge-warning',
@@ -78,19 +67,8 @@ $roleBadgeClass = match($currentUserRole) {
             </div>
 
             <div class="header-actions">
-                <!-- Active user switcher -->
-                <form action="/switch_role.php" method="POST" class="role-switcher-form">
-                    <label for="switch_user">Active Role:</label>
-                    <select id="switch_user" name="user_id" onchange="this.form.submit();" class="role-select">
-                        <?php foreach ($switcherUsers as $su): ?>
-                            <option value="<?= (int)$su['id'] ?>" <?= $currentUserId == $su['id'] ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($su['name']) ?> (<?= htmlspecialchars($su['role']) ?><?= $su['status'] === 'Banned' ? ' - BANNED' : '' ?>)
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </form>
-
-                <div style="display:flex; align-items:center; gap:8px;">
+                <div class="header-user-chip" title="Signed-in account">
+                    <span class="header-user-name"><?= htmlspecialchars($currentUserName) ?></span>
                     <span class="badge <?= $roleBadgeClass ?>"><?= htmlspecialchars($currentUserRole) ?></span>
                 </div>
             </div>

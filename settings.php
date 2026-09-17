@@ -172,7 +172,7 @@ include __DIR__ . '/components/header.php';
                                         <form method="POST" action="/settings.php" style="display:flex; gap:6px;">
                                             <input type="hidden" name="action" value="update_machine_status">
                                             <input type="hidden" name="machine_id" value="<?= (int)$m['id'] ?>">
-                                            <select name="status" onchange="this.form.submit();" class="role-select" style="font-size:11px; padding:2px 6px;">
+                                            <select name="status" onchange="this.form.submit();" class="form-control" style="font-size:11px; padding:2px 6px;">
                                                 <option value="Operational" <?= $m['status'] === 'Operational' ? 'selected' : '' ?>>Operational</option>
                                                 <option value="Maintenance" <?= $m['status'] === 'Maintenance' ? 'selected' : '' ?>>Maintenance</option>
                                                 <option value="Offline" <?= $m['status'] === 'Offline' ? 'selected' : '' ?>>Offline</option>

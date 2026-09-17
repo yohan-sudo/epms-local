@@ -26,7 +26,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $allowedRoles = ['Procurement Officer', 'Manager', 'Accountant', 'CEO'];
 
         $errors = [];
-        $name     = field_text($errors, 'name', 'Full name', true, 2, 100);
+        $name     = normalizePersonName(field_text($errors, 'name', 'Full name', true, 2, 100) ?? '');
+        if ($name !== '' && preg_match("/^[\p{Lu}0-9 .'\-]+$/u", $name) !== 1) {
+            $errors[] = "• Full name must be in CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only).";
+            $name = '';
+        }
         $username = field_username($errors, 'username');
         $role     = field_choice($errors, 'role', 'Role', $allowedRoles);
         $password = field_password($errors, 'password');
@@ -244,9 +248,11 @@ include __DIR__ . '/components/header.php';
                 <input type="hidden" name="action" value="create_user">
                 <div class="form-grid">
                     <div class="form-group">
-                        <label for="name">Full Name *</label>
-                        <input type="text" id="name" name="name" required placeholder="e.g. Sarah Jenkins" class="form-control"
-                               maxlength="100" data-plaintext data-required-error="Full name is required.">
+                        <label for="name">Full Name * <span style="font-weight:500; color:var(--text-muted); font-size:11px;">(in CAPITAL LETTERS)</span></label>
+                        <input type="text" id="name" name="name" required placeholder="e.g. SARAH JENKINS" class="form-control" pattern="[A-Za-z0-9 .'\-]+"
+                               maxlength="100" data-plaintext data-required-error="Full name is required."
+                               data-pattern-error="Full name must use CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only)."
+                               oninput="this.value = this.value.toUpperCase();"                 >
                     </div>
 
                     <div class="form-group">

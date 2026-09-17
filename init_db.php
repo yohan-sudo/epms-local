@@ -295,7 +295,7 @@ function initializeDatabase(PDO $db): void {
     $userStmt->execute(['GLORY GEORGE', 'glory_george', $passwordHash, $seedBlob, 'Manager', 'Active', '2026-01-15 10:15:00']);
     $userStmt->execute(['SWAUMU MKOMWA', 'swaumu_mkomwa', $passwordHash, $seedBlob, 'Accountant', 'Active', '2026-01-18 11:45:00']);
     $userStmt->execute(['GLORIA MGASSA', 'gloria_mgassa', $passwordHash, $seedBlob, 'Procurement Officer', 'Active', '2026-02-01 14:20:00']);
-    $userStmt->execute(['Victor Diaz', 'victor_diaz', $passwordHash, $seedBlob, 'Procurement Officer', 'Banned', '2026-03-01 16:00:00']);
+    $userStmt->execute(['VICTOR DIAZ', 'victor_diaz', $passwordHash, $seedBlob, 'Procurement Officer', 'Banned', '2026-03-01 16:00:00']);
 
     // Production pipeline, first stage to last (broom stick plant):
     //   1. Rounding (machines R1, R2, ...)

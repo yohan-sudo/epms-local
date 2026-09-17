@@ -181,6 +181,16 @@
       username.setAttribute('maxlength', '32');
       username.setAttribute('data-pattern-error', 'Use only letters, numbers, dots or underscores (3-32 characters).');
     }
+    var fullName = form.querySelector('input[name="name"]');
+    if (fullName) {
+      fullName.setAttribute('pattern', "[A-Z0-9 .'\\-]+");
+      fullName.setAttribute('data-pattern-error', 'Full name must use CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only).');
+      fullName.addEventListener('input', function () {
+        var pos = this.selectionStart;
+        this.value = this.value.toUpperCase();
+        try { this.setSelectionRange(pos, pos); } catch (e) { /* not fatal */ }
+      });
+    }
     var newPassword = form.querySelector('input[name="new_password"], input[name="password"]');
     if (newPassword) {
       newPassword.setAttribute('pattern', '\\S{6,64}');

@@ -191,7 +191,7 @@ INSERT INTO `users` (`id`, `name`, `username`, `password_hash`, `password_encryp
 (2, 'GLORY GEORGE', 'glory_george', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Manager', 'Active', '2026-01-15 10:15:00'),
 (3, 'SWAUMU MKOMWA', 'swaumu_mkomwa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Accountant', 'Active', '2026-01-18 11:45:00'),
 (4, 'GLORIA MGASSA', 'gloria_mgassa', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Active', '2026-02-01 14:20:00'),
-(5, 'Victor Diaz', 'victor_diaz', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Banned', '2026-03-01 16:00:00');
+(5, 'VICTOR DIAZ', 'victor_diaz', '$2y$10$YaDzh643sbUJcZKz1ItPIuD3emVlWfJnd3B.bkckpjNwUrhN8idt6', '/VwB3BQygjLv2k3AU3j1XNm2Aecs9SFmyzkSaVgE/ZRQS+PVyHE=', 'Procurement Officer', 'Banned', '2026-03-01 16:00:00');
 
 -- Production pipeline, first stage to last (broom stick plant):
 --   1. Rounding (machines R1, R2, ...) -> 2. Sanding (S1, ...) ->

@@ -140,9 +140,15 @@ curl -s -b "$JAR_CEO" "$BASE/audit_logs.php" | grep -q "Immutable System Audit T
 post "$JAR_CEO" "/petty_cash.php" "action=issue_float&issued_to=4&amount=1500000&purpose=CEO+test+float&issued_date=$(date +%Y-%m-%d)"
 BODY=$(get_page "$JAR_CEO" "/petty_cash.php")
 echo "$BODY" | grep -q "CEO test float" && check "CEO: float issued successfully" 0 || check "CEO: float issued successfully" 1
-# Create + delete a scratch user
+# Create + delete a scratch user (full name must be stored in CAPITAL LETTERS)
 post "$JAR_CEO" "/users.php" "action=create_user&name=Scratch+User&username=scratch_user&role=Manager&password=factory123"
 SCRATCH_ROW=$(get_page "$JAR_CEO" "/users.php" | grep -B8 "scratch_user" | grep -o '#[0-9]*' | head -1 | tr -d '#')
+BODY=$(get_page "$JAR_CEO" "/users.php")
+echo "$BODY" | grep -q "SCRATCH USER" && check "CEO: full name auto-normalized to CAPITALS" 0 || check "CEO: full name auto-normalized to CAPITALS" 1
+post "$JAR_CEO" "/users.php" "action=create_user&name=lower+case+name&username=lower_case_user&role=Manager&password=factory123"
+get_page "$JAR_CEO" "/users.php" | grep -q "lower_case_user" && check "PO-name lowercase still accepted (auto-uppercased)" 0 || check "PO-name lowercase still accepted (auto-uppercased)" 1
+LC_ROW=$(get_page "$JAR_CEO" "/users.php" | grep -B8 "lower_case_user" | grep -o '#[0-9]*' | head -1 | tr -d '#')
+post "$JAR_CEO" "/users.php" "action=delete_user&target_user_id=$LC_ROW"
 post "$JAR_CEO" "/users.php" "action=delete_user&target_user_id=$SCRATCH_ROW"
 BODY=$(get_page "$JAR_CEO" "/users.php")
 echo "$BODY" | grep -q "scratch_user" && check "CEO: user hard-deleted" 1 || check "CEO: user hard-deleted" 0
@@ -151,6 +157,10 @@ BODY=$(get_page "$JAR_CEO" "/users.php?action=new")
 echo "$BODY" | grep -q "System Operator" && check "CEO: no System Operator role anywhere" 1 || check "CEO: no System Operator role anywhere" 0
 echo "$BODY" | grep -q '"Admin"' && check "CEO: no Admin role in create form" 1 || check "CEO: no Admin role in create form" 0
 echo "$BODY" | grep -q "CEO (Owner" && check "CEO: CEO role offered in create form" 0 || check "CEO: CEO role offered in create form" 1
+# Role switcher removed: no endpoint, no header dropdown
+curl -s -o /dev/null -w "%{http_code}" "$BASE/switch_role.php" | grep -q "404" && check "switch_role.php endpoint removed (404)" 0 || check "switch_role.php endpoint removed (404)" 1
+get_page "$JAR_CEO" "/dashboard.php" | grep -q "Active Role:" && check "header shows no Active Role switcher" 1 || check "header shows no Active Role switcher" 0
+get_page "$JAR_CEO" "/dashboard.php" | grep -q "header-user-chip" && check "header shows signed-in identity chip" 0 || check "header shows signed-in identity chip" 1
 
 echo ""
 echo "=== 6. Search & Reports retrieve data ==="

@@ -8,6 +8,16 @@ require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/session.php';
 
 /**
+ * Normalize a person's full name to the house format: CAPITAL LETTERS.
+ * Collapses internal whitespace; letters, apostrophes, hyphens and dots
+ * are preserved (uppercased where the multibyte extension is available).
+ */
+function normalizePersonName(string $value): string {
+    $value = trim(preg_replace('/\s+/u', ' ', $value) ?? $value);
+    return function_exists('mb_strtoupper') ? mb_strtoupper($value, 'UTF-8') : strtoupper($value);
+}
+
+/**
  * Reversible password vault (AES-256-GCM).
  *
  * Login still verifies against the bcrypt hash; this encrypted copy exists ONLY

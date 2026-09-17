@@ -20,37 +20,37 @@ Four human roles plus an automated audit system. The **CEO (Owner)** inherits ev
 capabilities as override authority; the **Procurement Officer submits but never approves**.
 
 ```mermaid
-flowchart LR
-    subgraph UEPMS["U EPMS — Enterprise Plant Monitoring System"]
+graph LR
+    subgraph UEPMS["U EPMS - Enterprise Plant Monitoring System"]
         UC1(["Log In / Log Out"])
         UC2(["View Personal Dashboard"])
 
-        subgraph Admin["Administration — CEO only"]
+        subgraph Admin["Administration - CEO only"]
             UC10(["Manage User Accounts"])
             UC12(["Configure System Settings"])
             UC13(["Review Immutable Audit Trail"])
-            UC14(["Issue Petty-Cash Float<br/>800k–7M TZS, Accountant only"])
+            UC14(["Issue Petty-Cash Float<br/>800k to 7M TZS, Accountant only"])
         end
 
         subgraph Prod["Production"]
             UC20(["File Shift Production Report"])
             UC21(["Classify Units:<br/>In-Process vs Completed Goods"])
-            UC22(["Log Rejects, Reasons & Root Causes"])
+            UC22(["Log Rejects, Reasons and Root Causes"])
         end
 
-        subgraph Proc["Procurement — Submit → Manager → Accountant"]
+        subgraph Proc["Procurement: Submit, then Manager, then Accountant"]
             UC30(["Submit Procurement Record"])
-            UC31(["Approve / Reject<br/>1st line (Manager)"])
-            UC32(["Final-Approve / Reject<br/>locks record (Accountant)"])
+            UC31(["Approve or Reject<br/>1st line (Manager)"])
+            UC32(["Final-Approve or Reject<br/>locks record (Accountant)"])
         end
 
         subgraph Cash["Petty Cash"]
             UC40(["Record Expense Against Float"])
-            UC41(["View Float Balances & Ledger"])
+            UC41(["View Float Balances and Ledger"])
         end
 
-        UC50(["Search & Date-Filter Records"])
-        UC60(["Generate Report — HTML / PDF / Excel"])
+        UC50(["Search and Date-Filter Records"])
+        UC60(["Generate Report - HTML / PDF / Excel"])
     end
 
     CEO(["CEO (Owner)"]) --> UC1
@@ -58,22 +58,32 @@ flowchart LR
     ACC(["Accountant"]) --> UC1
     PO(["Procurement Officer"]) --> UC1
 
-    CEO --> UC10 & UC12 & UC13 & UC14
-    MGR --> UC20 & UC31 & UC40
-    ACC --> UC32 & UC40 & UC41
-    PO --> UC30
-    CEO -. "inherits all role abilities" .-> UC20
+    CEO --> UC10
+    CEO --> UC12
+    CEO --> UC13
+    CEO --> UC14
+    CEO -.->|"inherits all role abilities"| UC20
     CEO -.-> UC31
     CEO -.-> UC32
 
-    UC1 --> UC2
-    UC20 -. include .-> UC21
-    UC20 -. include .-> UC22
-    UC14 -. include .-> UC41
-    UC40 -. include .-> UC41
-    UC60 -. extend .-> UC50
+    MGR --> UC20
+    MGR --> UC31
+    MGR --> UC40
 
-    SYS(["System (Audit Logger)"]) -. records every event .-> UC1
+    ACC --> UC32
+    ACC --> UC40
+    ACC --> UC41
+
+    PO --> UC30
+
+    UC1 --> UC2
+    UC20 -.->|"include"| UC21
+    UC20 -.->|"include"| UC22
+    UC14 -.->|"include"| UC41
+    UC40 -.->|"include"| UC41
+    UC60 -.->|"extend"| UC50
+
+    SYS(["System (Audit Logger)"]) -.->|"records every event"| UC1
     SYS -.-> UC10
     SYS -.-> UC31
     SYS -.-> UC32
@@ -85,60 +95,101 @@ flowchart LR
 **Level 0 (Context)** — the system boundary:
 
 ```mermaid
-flowchart TB
+graph TB
     CEO["CEO (Owner)"]
     MGR["Manager"]
     ACC["Accountant"]
     PO["Procurement Officer"]
     P0(("0<br/>U EPMS<br/>Enterprise Plant<br/>Monitoring System"))
 
-    CEO -- "credentials, user mgmt, settings, float issuance, audit queries" --> P0
-    P0 -- "admin dashboards, audit trail, reports (HTML/PDF/XLSX)" --> CEO
-    MGR -- "shift production reports, 1st-line approvals, expenses" --> P0
-    P0 -- "worklists, KPI dashboards, ledgers" --> MGR
-    ACC -- "final procurement approvals, expenses" --> P0
-    P0 -- "approval worklists, float balances" --> ACC
-    PO -- "procurement submissions" --> P0
-    P0 -- "submission portal, status tracking" --> PO
+    CEO -->|"credentials, user mgmt, settings, float issuance, audit queries"| P0
+    P0 -->|"admin dashboards, audit trail, reports (HTML / PDF / XLSX)"| CEO
+    MGR -->|"shift production reports, 1st-line approvals, expenses"| P0
+    P0 -->|"worklists, KPI dashboards, ledgers"| MGR
+    ACC -->|"final procurement approvals, expenses"| P0
+    P0 -->|"approval worklists, float balances"| ACC
+    PO -->|"procurement submissions"| P0
+    P0 -->|"submission portal, status tracking"| PO
 ```
 
 **Level 1** — major subsystems mapped to real pages and tables (D# = MySQL table in `factory_db`):
 
 ```mermaid
-flowchart TB
-    CEO["CEO"] & MGR["Manager"] & ACC["Accountant"] & PO["Procurement Officer"]
+graph TB
+    CEO["CEO"]
+    MGR["Manager"]
+    ACC["Accountant"]
+    PO["Procurement Officer"]
 
     P1(("1 Authentication<br/>index.php / auth.php"))
     P2(("2 Dashboard<br/>dashboard.php"))
     P3(("3 Production Logging<br/>production.php"))
-    P4(("4 Procurement & Approvals<br/>procurement.php"))
+    P4(("4 Procurement and Approvals<br/>procurement.php"))
     P5(("5 Petty Cash<br/>petty_cash.php"))
-    P6(("6 User & Settings Admin<br/>users.php / settings.php"))
+    P6(("6 User and Settings Admin<br/>users.php / settings.php"))
     P7(("7 Reporting Engine<br/>reports.php"))
     P8(("8 Audit Logging<br/>logAudit()"))
 
-    D1[("D1 users")] & D2[("D2 audit_logs")] & D3[("D3 procurement_entries")]
-    D4[("D4 daily_reports")] & D5[("D5 process_reject_logs")]
-    D6[("D6 processes")] & D7[("D7 machines")]
-    D8[("D8 petty_cash_issuances")] & D9[("D9 petty_cash_expenses")]
+    D1[("D1 users")]
+    D2[("D2 audit_logs")]
+    D3[("D3 procurement_entries")]
+    D4[("D4 daily_reports")]
+    D5[("D5 process_reject_logs")]
+    D6[("D6 processes")]
+    D7[("D7 machines")]
+    D8[("D8 petty_cash_issuances")]
+    D9[("D9 petty_cash_expenses")]
 
-    CEO & MGR & ACC & PO -->|"credentials"| P1
-    P1 <-->|"verify password, role, status"| D1
+    CEO -->|"credentials"| P1
+    MGR -->|"credentials"| P1
+    ACC -->|"credentials"| P1
+    PO -->|"credentials"| P1
+    P1 -->|"verify password, role, status"| D1
+
     MGR -->|"shift report"| P3
-    P3 --> D4 & D5
-    D6 & D7 --> P3
+    P3 --> D4
+    P3 --> D5
+    D6 --> P3
+    D7 --> P3
+
     PO -->|"submission"| P4
-    MGR & ACC -->|"gate decisions"| P4
-    P4 <--> D3
+    MGR -->|"gate decisions"| P4
+    ACC -->|"gate decisions"| P4
+    P4 --> D3
+
     CEO -->|"issue float"| P5
-    MGR & ACC -->|"expenses"| P5
-    P5 <--> D8 & D9
+    MGR -->|"expenses"| P5
+    ACC -->|"expenses"| P5
+    P5 --> D8
+    P5 --> D9
+
     CEO -->|"user CRUD, settings"| P6
-    P6 <--> D1
-    CEO & MGR & ACC & PO -->|"report requests"| P7
-    P7 -->|"HTML / PDF / XLSX"| CEO & MGR & ACC & PO
-    P3 & P4 & P5 & P6 & P7 -->|"events"| P8 --> D2
-    P2 -->|"role-scoped KPIs & worklists"| MGR & ACC & PO & CEO
+    P6 --> D1
+
+    CEO -->|"report requests"| P7
+    MGR -->|"report requests"| P7
+    ACC -->|"report requests"| P7
+    PO -->|"report requests"| P7
+    P7 -->|"HTML / PDF / XLSX"| CEO
+    P7 --> MGR
+    P7 --> ACC
+    P7 --> PO
+
+    P3 -->|"events"| P8
+    P4 -->|"events"| P8
+    P5 -->|"events"| P8
+    P6 -->|"events"| P8
+    P7 -->|"events"| P8
+    P8 --> D2
+
+    MGR --> P2
+    ACC --> P2
+    PO --> P2
+    CEO --> P2
+    P2 -->|"role-scoped KPIs and worklists"| MGR
+    P2 --> ACC
+    P2 --> PO
+    P2 --> CEO
 ```
 
 ### Entity-Relationship Diagram
@@ -147,11 +198,11 @@ flowchart TB
 
 ```mermaid
 erDiagram
-    users ||--o{ procurement_entries : "submitted_by / manager_approved_by / accountant_approved_by"
+    users ||--o{ procurement_entries : "submits and approves"
     users ||--o{ daily_reports : "supervisor_id"
-    users ||--o{ petty_cash_issuances : "issued_by (CEO) / issued_to (Accountant)"
+    users ||--o{ petty_cash_issuances : "issued_by and issued_to"
     users ||--o{ petty_cash_expenses : "approved_by"
-    users ||--o{ audit_logs : "actor_id (SET NULL on delete)"
+    users ||--o{ audit_logs : "actor_id, SET NULL on delete"
 
     processes ||--o{ machines : "process_id"
     machines ||--o{ daily_reports : "machine_id"
@@ -163,12 +214,12 @@ erDiagram
         int id PK
         varchar username UK
         varchar password_hash "bcrypt"
-        varchar role "CEO|Manager|Accountant|Procurement Officer"
-        varchar status "Active|Banned"
+        varchar role "CEO / Manager / Accountant / Procurement Officer"
+        varchar status "Active or Banned"
     }
     processes {
         int id PK
-        varchar name "1 Rounding … 5 Cups … 6 Packaging/Sewing"
+        varchar name "Rounding to Sanding to P.V.C to Cups to Packaging"
     }
     machines {
         int id PK
@@ -179,8 +230,8 @@ erDiagram
         int id PK
         date report_date
         varchar shift
-        int units_produced "Units Processed (gross)"
-        int good_units "DERIVED: units - rejects"
+        int units_produced "Units Processed gross"
+        int good_units "DERIVED: units minus rejects"
     }
     process_reject_logs {
         int report_id FK
@@ -191,14 +242,14 @@ erDiagram
     procurement_entries {
         int id PK
         varchar reference_no UK "PRC-YYYY-NNNN"
-        varchar status "Pending Manager Review > Pending Accountant Review > Finalized"
+        varchar status "Pending Manager Review then Pending Accountant Review then Finalized"
         decimal total_cost "qty x unit_cost"
     }
     petty_cash_issuances {
         int id PK
         varchar voucher_no UK "PV-YYYY-NNNN"
-        decimal amount "800,000-7,000,000 TZS"
-        varchar status "Active|Closed"
+        decimal amount "800,000 to 7,000,000 TZS"
+        varchar status "Active or Closed"
     }
     petty_cash_expenses {
         int issuance_id FK

@@ -306,7 +306,7 @@ include __DIR__ . '/components/header.php';
         <!-- Right: Role Capabilities & Access Matrix Reminder -->
         <div class="card" style="margin-bottom:0;">
             <div class="card-header">
-                <h3 class="card-title">Active Role Matrix</h3>
+                <h3 class="card-title">Role &amp; Access Matrix</h3>
             </div>
             <div style="font-size:13px; color:var(--text-muted); line-height:1.6;">
                 <p style="margin-bottom:12px;">You are currently operating with the permissions of: <strong style="color:var(--text-main);"><?= htmlspecialchars($currentUserRole) ?></strong>.</p>
@@ -340,7 +340,7 @@ include __DIR__ . '/components/header.php';
                 </div>
 
                 <p style="font-size:12px; color:var(--text-subtle);">
-                    Tip: Use the <strong>Active Role</strong> dropdown in the top bar anytime to switch personas and test different authorization workflows.
+                    Tip: Your role's permissions are fixed for the session — sign in with your own account each time to act under the right authority.
                 </p>
             </div>
         </div>

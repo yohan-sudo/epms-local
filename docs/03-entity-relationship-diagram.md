@@ -25,67 +25,67 @@ erDiagram
     petty_cash_issuances ||--o{ petty_cash_expenses : "issuance_id"
 
     users {
-        int unsigned id PK
+        int id PK
         varchar name
         varchar username UK
         varchar password_hash
-        varbinary password_encrypted "nullable — legacy vault copy"
-        varchar role "CEO|Manager|Accountant|Procurement Officer"
-        varchar status "Active|Banned"
+        varbinary password_encrypted "nullable, legacy vault copy"
+        varchar role "CEO / Manager / Accountant / Procurement Officer"
+        varchar status "Active or Banned"
         datetime created_at
     }
     processes {
-        int unsigned id PK
-        varchar name "Rounding|Sanding|P.V.C (K Line)|P.V.C (O Line)|Cups|Packaging / Sewing"
+        int id PK
+        varchar name "Rounding / Sanding / P.V.C K Line / P.V.C O Line / Cups / Packaging-Sewing"
         text description
         varchar status "Active"
     }
     machines {
-        int unsigned id PK
+        int id PK
         varchar code UK "R1 R2 S1 S2 K1 O1"
         varchar name
-        int unsigned process_id FK
-        varchar status "Operational|Maintenance|Down"
+        int process_id FK
+        varchar status "Operational / Maintenance / Down"
     }
     daily_reports {
-        int unsigned id PK
+        int id PK
         date report_date
-        varchar shift "Morning|Afternoon|Night"
-        int unsigned supervisor_id FK
-        int unsigned machine_id FK
-        int unsigned units_produced "Units Processed (gross)"
-        int unsigned good_units "DERIVED: units - rejects"
+        varchar shift "Morning / Afternoon / Night"
+        int supervisor_id FK
+        int machine_id FK
+        int units_produced "Units Processed (gross)"
+        int good_units "DERIVED: units - rejects"
         text supervisor_notes
         datetime created_at
     }
     process_reject_logs {
-        int unsigned id PK
-        int unsigned report_id FK
-        int unsigned process_id FK
-        int unsigned partial_reject_count "reworkable"
-        int unsigned total_reject_count "scrapped"
+        int id PK
+        int report_id FK
+        int process_id FK
+        int partial_reject_count "reworkable"
+        int total_reject_count "scrapped"
         varchar reject_reason
         varchar root_cause
     }
     procurement_entries {
-        int unsigned id PK
+        int id PK
         varchar reference_no UK "PRC-YYYY-NNNN"
-        int unsigned submitted_by FK
+        int submitted_by FK
         varchar supplier
         varchar item_name
         varchar category
         decimal quantity
         varchar unit
         decimal unit_cost
-        decimal total_cost "qty × unit_cost"
-        varchar status "Pending Manager Review|Pending Accountant Review|Finalized|Rejected"
-        int unsigned manager_approved_by FK
+        decimal total_cost "qty x unit_cost"
+        varchar status "Pending Manager Review / Pending Accountant Review / Finalized / Rejected"
+        int manager_approved_by FK
         datetime manager_approved_at
         text manager_notes
-        int unsigned accountant_approved_by FK
+        int accountant_approved_by FK
         datetime accountant_approved_at
         text accountant_notes
-        int unsigned admin_approved_by FK
+        int admin_approved_by FK
         datetime admin_approved_at
         text admin_notes
         text rejection_reason
@@ -93,30 +93,30 @@ erDiagram
         datetime created_at
     }
     petty_cash_issuances {
-        int unsigned id PK
+        int id PK
         varchar voucher_no UK "PV-YYYY-NNNN"
-        int unsigned issued_to FK "Accountant only (app rule)"
-        int unsigned issued_by FK "CEO only (app rule)"
-        decimal amount "800,000 – 7,000,000 TZS (app rule)"
+        int issued_to FK "Accountant only (app rule)"
+        int issued_by FK "CEO only (app rule)"
+        decimal amount "800,000 to 7,000,000 TZS (app rule)"
         varchar purpose
-        varchar status "Active|Closed"
+        varchar status "Active or Closed"
         date issued_date
         datetime created_at
     }
     petty_cash_expenses {
-        int unsigned id PK
-        int unsigned issuance_id FK
+        int id PK
+        int issuance_id FK
         date expense_date
         varchar category
         varchar description
         decimal amount
         varchar receipt_no
-        int unsigned approved_by FK "recording officer"
+        int approved_by FK "recording officer"
         datetime created_at
     }
     audit_logs {
-        int unsigned id PK
-        int unsigned actor_id FK "nullable — detached rows remain"
+        int id PK
+        int actor_id FK "nullable, detached rows remain"
         varchar action "e.g. LOGIN, REPORT_GENERATED, PROCUREMENT_FINALIZED"
         varchar entity_type
         varchar entity_id
@@ -169,8 +169,6 @@ If your documentation tooling prefers classic crow's-foot diagrams (e.g. draw.io
 
 ```mermaid
 erDiagram
-    direction LR
-
     PROCESSES ||--o{ MACHINES : "groups"
     MACHINES ||--o{ DAILY_REPORTS : "produced on"
     DAILY_REPORTS ||--o| PROCESS_REJECT_LOGS : "breaks down into"
