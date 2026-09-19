@@ -133,3 +133,7 @@ if (!uepms_schema_is_initialized($db)) {
 }
 uepms_migrate($db);
 uepms_backfill_default_vault($db);
+
+// v2.2 migration set (2026-09): new modules + hardened auth/audit shapes.
+require_once __DIR__ . '/migrations.php';
+uepms_migrate_v22($db);

@@ -8,7 +8,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
 require_once __DIR__ . '/components/filter_bar.php';
 
-requireRole(['CEO', 'Manager', 'Accountant']);
+requireRole(['CEO', 'Manager', 'Supervisor', 'Assistant Manager']); // v2.3: Accountant removed - payments role only
 
 $pageTitle = 'Production Shift Reports';
 $activeNav = 'production';
@@ -17,10 +17,10 @@ $currentUserRole = $_SESSION['user_role'];
 $currentUserId = $_SESSION['user_id'];
 $currentUserName = $_SESSION['user_name'];
 
-// Handle POST: Submit Shift Production Report
+// Handle POST: Submit Shift Production Report (v2.3: Supervisor logs, Manager verifies)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'save_shift_report') {
-    if (!in_array($currentUserRole, ['Manager', 'CEO'], true)) {
-        setFlash('error', 'Only the Manager or CEO can file daily shift production logs.');
+    if (!in_array($currentUserRole, ['Supervisor', 'CEO'], true)) {
+        setFlash('error', 'Logging production is the Supervisor\'s job. The Manager verifies entries but does not log them.');
         header('Location: /production.php');
         exit;
     }
@@ -35,8 +35,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $unitsProcessed = field_int($errors, 'units_processed', 'Units processed', 1) ?? 0;
     $partialRejects = field_int($errors, 'partial_reject_count', 'Partial rejects (reworkable)', 0) ?? 0;
     $totalRejects   = field_int($errors, 'total_reject_count', 'Total rejects (scrapped)', 0) ?? 0;
-    $rejectReason   = field_text($errors, 'reject_reason', 'Reject reason', false, 0, 255) ?? '';
+    $rejectReason   = field_choice($errors, 'reject_reason', 'Reject reason', [
+        'No rejects', 'Burr formation', 'Dimensional out-of-spec', 'Surface oxidation',
+        'Cracked / split material', 'Machine misalignment', 'Wrong feedstock (bad batch)',
+        'Operator error', 'Power interruption', 'Other (see notes)',
+    ]) ?? 'No rejects';
     $rootCause      = field_text($errors, 'root_cause', 'Root cause', false, 0, 255) ?? '';
+    // Optional: only validate when the user actually picked a batch
+    $batchId = 0;
+    if (trim((string)($_POST['batch_id'] ?? '')) !== '') {
+        $batchId = field_int($errors, 'batch_id', 'Material batch', 1) ?? 0;
+    }
     $supervisorNotes= field_text($errors, 'supervisor_notes', 'Supervisor notes', false, 0, 1000) ?? '';
 
     // Validation
@@ -77,10 +86,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         ]);
         $reportId = (int)$db->lastInsertId();
 
-        // 2. Insert Process Reject Breakdown
+        // 2. Insert Process Reject Breakdown (with material batch link)
         $stmtReject = $db->prepare("
-            INSERT INTO process_reject_logs (report_id, process_id, partial_reject_count, total_reject_count, reject_reason, root_cause)
-            VALUES (:rep_id, :proc_id, :partial, :total, :reason, :cause)
+            INSERT INTO process_reject_logs (report_id, process_id, partial_reject_count, total_reject_count, reject_reason, root_cause, batch_id)
+            VALUES (:rep_id, :proc_id, :partial, :total, :reason, :cause, :batch)
         ");
         $stmtReject->execute([
             ':rep_id'  => $reportId,
@@ -88,7 +97,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             ':partial' => $partialRejects,
             ':total'   => $totalRejects,
             ':reason'  => $rejectReason,
-            ':cause'   => $rootCause
+            ':cause'   => $rootCause,
+            ':batch'   => $batchId > 0 ? $batchId : null,
         ]);
 
         // 3. Log Audit
@@ -101,8 +111,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             "Shift report #{$reportId} filed by {$currentUserName}. Units processed: {$unitsProcessed} ({$unitStatus}), Accepted: {$goodUnits}, Scrap: {$totalRejects}, Reworkable: {$partialRejects}."
         );
 
+        // v2.3 approval gate: ALL logs (Supervisor or CEO) await the Manager's
+        // verification - the Manager never logs, only verifies.
+        $approvalStatus = 'Pending Manager Approval';
+        $db->prepare('UPDATE daily_reports SET approval_status = :st, approved_by = NULL WHERE id = :id')
+           ->execute([
+               ':st' => $approvalStatus,
+               ':id' => $reportId,
+           ]);
+
         $db->commit();
-        setFlash('success', "Shift report #{$reportId} recorded: " . formatNumber($unitsProcessed) . " units processed ({$unitStatus}).");
+
+        // v2.2: alert the Manager+CEO when rejects are heavy or a target was missed
+        $target = $targetsByProcess[(int)$processId] ?? 0;
+        if ($target > 0 && $goodUnits < $target) {
+            notifyRoles($db, ['Manager', 'CEO'], 'Shift below target', "Shift #{$reportId} on {$processId}: {$goodUnits} accepted vs target {$target} (" . date('M d') . ').', '/production.php');
+        }
+        if ($approvalStatus === 'Pending Manager Approval') {
+            notifyRoles($db, ['Manager'], 'Production log awaiting your verification', "Shift #{$reportId} ({$unitsProcessed} units) logged by {$currentUserName} - verify its authenticity.", '/production.php');
+        }
+
+        setFlash('success', "Shift report #{$reportId} recorded: " . formatNumber($unitsProcessed) . " units processed ({$unitStatus})." . ($approvalStatus === 'Pending Manager Approval' ? ' Awaiting the Manager\'s verification.' : ''));
         header('Location: /production.php');
         exit;
     } catch (Exception $e) {
@@ -111,6 +140,174 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         header('Location: /production.php?action=new');
         exit;
     }
+}
+
+// Handle POST: Manager verifies a Supervisor's production log (v2.3)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'verify_report') {
+    if ($currentUserRole !== 'Manager') {
+        setFlash('error', 'Only the Manager verifies production logs.');
+        header('Location: /production.php');
+        exit;
+    }
+    $repId = (int)($_POST['report_id'] ?? 0);
+    $decision = ($_POST['decision'] ?? '') === 'approve' ? 'approve' : 'reject';
+    $notes = mb_substr(trim((string)($_POST['approval_notes'] ?? '')), 0, 255);
+    $rep = $db->query('SELECT * FROM daily_reports WHERE id = ' . $repId)->fetch();
+    if (!$rep || $rep['approval_status'] !== 'Pending Manager Approval') {
+        setFlash('error', 'That report is not awaiting verification.');
+        header('Location: /production.php');
+        exit;
+    }
+    if ($decision === 'approve') {
+        $db->prepare("UPDATE daily_reports SET approval_status = 'Manager Verified', approved_by = :by, approved_at = CURRENT_TIMESTAMP, approval_notes = :n WHERE id = :id")
+           ->execute([':by' => $currentUserId, ':n' => $notes, ':id' => $repId]);
+        logAudit($db, 'PRODUCTION_REPORT_VERIFIED', 'PRODUCTION_REPORT', $repId, "Manager {$currentUserName} verified shift report #{$repId} ({$rep['units_produced']} units) as authentic.");
+        notifyUser($db, (int)$rep['supervisor_id'], 'Production log verified', "Shift #{$repId} was verified by the Manager." . ($notes !== '' ? " Note: {$notes}" : ''), '/production.php');
+        setFlash('success', "Report #{$repId} verified.");
+    } else {
+        $db->prepare("UPDATE daily_reports SET approval_status = 'Rejected by Manager', approved_by = :by, approved_at = CURRENT_TIMESTAMP, approval_notes = :n WHERE id = :id")
+           ->execute([':by' => $currentUserId, ':n' => $notes !== '' ? $notes : 'Rejected', ':id' => $repId]);
+        logAudit($db, 'PRODUCTION_REPORT_REJECTED', 'PRODUCTION_REPORT', $repId, "Manager {$currentUserName} REJECTED shift report #{$repId}: {$notes}");
+        notifyUser($db, (int)$rep['supervisor_id'], 'Production log rejected', "Shift #{$repId} was rejected by the Manager" . ($notes !== '' ? ": {$notes}" : '.') . ' Request a correction if needed.', '/corrections.php');
+        setFlash('warning', "Report #{$repId} rejected.");
+    }
+    header('Location: /production.php');
+    exit;
+}
+
+// Handle POST: Supervisor reports machine failure -> Manager verifies (v2.3)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'report_failure') {
+    if (!in_array($currentUserRole, ['Supervisor', 'Manager', 'CEO'], true)) {
+        setFlash('error', 'Only the Supervisor can report machine failures.');
+        header('Location: /production.php');
+        exit;
+    }
+    $errors = [];
+    $fMachine = field_int($errors, 'machine_id', 'Machine', 1) ?? 0;
+    $fReason  = field_text($errors, 'failure_reason', 'Failure reason', true, 3, 255) ?? '';
+    if ($errors) {
+        redirectWithErrors('/production.php', $errors);
+    }
+    $db->prepare("INSERT INTO machine_failures (machine_id, reported_by, failure_reason) VALUES (:m, :by, :r)")
+       ->execute([':m' => $fMachine, ':by' => $currentUserId, ':r' => $fReason]);
+    logAudit($db, 'MACHINE_FAILURE_REPORTED', 'MACHINE', $fMachine, "{$currentUserName} reported a machine failure: {$fReason} - awaiting the Manager's verification.");
+    notifyRoles($db, ['Manager'], 'Machine failure reported', "Machine #{$fMachine}: {$fReason} (reported by {$currentUserName}) - verify and arrange repair.", '/production.php#failures');
+    setFlash('success', 'Failure report sent to the Manager.');
+    header('Location: /production.php');
+    exit;
+}
+
+// Handle POST: Manager verifies a failure report (v2.3)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'verify_failure') {
+    if ($currentUserRole !== 'Manager') {
+        setFlash('error', 'Only the Manager verifies failure reports.');
+        header('Location: /production.php');
+        exit;
+    }
+    $fId = (int)($_POST['failure_id'] ?? 0);
+    $decision = ($_POST['decision'] ?? '') === 'confirm' ? 'confirm' : 'dismiss';
+    $notes = mb_substr(trim((string)($_POST['manager_notes'] ?? '')), 0, 255);
+    $f = $db->query('SELECT * FROM machine_failures WHERE id = ' . $fId)->fetch();
+    if (!$f || $f['status'] !== 'Pending Verification') {
+        setFlash('error', 'That report is not awaiting verification.');
+        header('Location: /production.php');
+        exit;
+    }
+    if ($decision === 'confirm') {
+        $db->prepare("UPDATE machine_failures SET status = 'Verified - Repair Needed', verified_by = :by, verified_at = CURRENT_TIMESTAMP, manager_notes = :n WHERE id = :id")
+           ->execute([':by' => $currentUserId, ':n' => $notes, ':id' => $fId]);
+        logAudit($db, 'MACHINE_FAILURE_VERIFIED', 'MACHINE', (int)$f['machine_id'], "Manager {$currentUserName} verified failure report #{$fId}: {$f['failure_reason']}");
+        setFlash('success', 'Failure verified - arrange repair.');
+    } else {
+        $db->prepare("UPDATE machine_failures SET status = 'Dismissed', verified_by = :by, verified_at = CURRENT_TIMESTAMP, manager_notes = :n WHERE id = :id")
+           ->execute([':by' => $currentUserId, ':n' => $notes, ':id' => $fId]);
+        logAudit($db, 'MACHINE_FAILURE_DISMISSED', 'MACHINE', (int)$f['machine_id'], "Manager {$currentUserName} dismissed failure report #{$fId}: {$notes}");
+        setFlash('info', 'Report dismissed.');
+    }
+    notifyUser($db, (int)$f['reported_by'], 'Failure report decision', "Your failure report #{$fId} was " . ($decision === 'confirm' ? 'verified' : 'dismissed') . ' by the Manager.', '/production.php#failures');
+    header('Location: /production.php');
+    exit;
+}
+
+// Handle POST: Supervisor logs electricity usage (v2.3)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'log_electricity') {
+    if (!in_array($currentUserRole, ['Supervisor', 'Manager', 'CEO'], true)) {
+        setFlash('error', 'Only the Supervisor logs electricity usage.');
+        header('Location: /production.php');
+        exit;
+    }
+    $errors = [];
+    $eDate = field_date($errors, 'reading_date', 'Date', true, true) ?? date('Y-m-d');
+    $eShift = field_text($errors, 'shift', 'Shift', false, 0, 40) ?? 'Morning';
+    $eKwh  = field_float($errors, 'meter_kwh', 'Meter reading (kWh)', 0.01) ?? 0;
+    $eUnits= field_float($errors, 'units_produced', 'Units produced', 0) ?? 0;
+    $eNote = field_text($errors, 'notes', 'Notes', false, 0, 255) ?? '';
+    if ($errors) {
+        redirectWithErrors('/production.php', $errors);
+    }
+    $db->prepare('INSERT INTO electricity_readings (reading_date, shift, meter_kwh, units_produced, notes, logged_by) VALUES (:d, :s, :k, :u, :n, :by)')
+       ->execute([':d' => $eDate, ':s' => $eShift, ':k' => $eKwh, ':u' => $eUnits, ':n' => $eNote, ':by' => $currentUserId]);
+    logAudit($db, 'ELECTRICITY_LOGGED', 'ELECTRICITY', $eDate, "{$currentUserName} logged {$eKwh} kWh for {$eShift} ({$eDate}) - {$eUnits} units produced.");
+    setFlash('success', 'Electricity usage recorded.');
+    header('Location: /production.php');
+    exit;
+}
+
+// Handle POST: log machine downtime (item 20)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'log_downtime') {
+    if (!in_array($currentUserRole, ['Manager', 'CEO'], true)) {
+        setFlash('error', 'Only the Manager or CEO can log machine downtime.');
+        header('Location: /production.php');
+        exit;
+    }
+    $errors = [];
+    $dtMachine = field_int($errors, 'machine_id', 'Machine', 1) ?? 0;
+    $dtDate    = field_date($errors, 'report_date', 'Date', true, true) ?? date('Y-m-d');
+    $dtShift   = field_text($errors, 'shift', 'Shift', false, 0, 40) ?? '';
+    $dtStart   = (string)($_POST['started_at'] ?? '');
+    $dtEnd     = (string)($_POST['ended_at'] ?? '');
+    $dtReason  = field_text($errors, 'reason', 'Reason', true, 3, 255) ?? '';
+    if (!preg_match('/^\d{2}:\d{2}$/', $dtStart)) {
+        $errors[] = '• Start time is required (HH:MM).';
+    }
+    if ($errors) {
+        redirectWithErrors('/production.php', $errors);
+    }
+    $minutes = 0;
+    if (preg_match('/^\d{2}:\d{2}$/', $dtEnd)) {
+        $minutes = (int)round((strtotime($dtEnd) - strtotime($dtStart)) / 60);
+        if ($minutes < 0) {
+            $minutes += 24 * 60; // overnight
+        }
+    }
+    $db->prepare("INSERT INTO machine_downtime (machine_id, report_date, shift, started_at, ended_at, minutes, reason, recorded_by) VALUES (:m, :d, :s, :st, :en, :min, :r, :by)")
+       ->execute([':m' => $dtMachine, ':d' => $dtDate, ':s' => $dtShift, ':st' => $dtStart, ':en' => $dtEnd !== '' ? $dtEnd : null, ':min' => $minutes, ':r' => $dtReason, ':by' => $currentUserId]);
+    logAudit($db, 'MACHINE_DOWNTIME_LOGGED', 'MACHINE', $dtMachine, "{$currentUserName} logged downtime of {$minutes} min ({$dtStart}" . ($dtEnd ? "-{$dtEnd}" : '-ongoing') . "): {$dtReason}");
+    setFlash('success', "Downtime logged ({$minutes} minutes).");
+    header('Location: /production.php');
+    exit;
+}
+
+// Handle POST: set a shift target for a process (item 21, CEO/Manager)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'set_target') {
+    if (!in_array($currentUserRole, ['Manager', 'CEO'], true)) {
+        setFlash('error', 'Only the Manager or CEO can set shift targets.');
+        header('Location: /production.php');
+        exit;
+    }
+    $errors = [];
+    $tgProcess = field_int($errors, 'process_id', 'Process', 1) ?? 0;
+    $tgFrom    = field_date($errors, 'effective_from', 'Effective from') ?? date('Y-m-d');
+    $tgAmount  = field_int($errors, 'target_per_shift', 'Target per shift', 1) ?? 0;
+    if ($errors) {
+        redirectWithErrors('/production.php', $errors);
+    }
+    $db->prepare("INSERT INTO shift_targets (process_id, effective_from, target_per_shift, created_by) VALUES (:p, :f, :t, :by)")
+       ->execute([':p' => $tgProcess, ':f' => $tgFrom, ':t' => $tgAmount, ':by' => $currentUserId]);
+    logAudit($db, 'SHIFT_TARGET_SET', 'PRODUCTION', $tgProcess, "{$currentUserName} set target of {$tgAmount} units/shift for process #{$tgProcess} effective {$tgFrom}");
+    setFlash('success', "Target set: {$tgAmount} units per shift.");
+    header('Location: /production.php');
+    exit;
 }
 
 // ---- Search & date-range filter (shared contract: q, from, to) ----
@@ -139,15 +336,19 @@ $stmtReports = $db->prepare("
            COALESCE(p.id, 0) AS process_id,
            COALESCE(p.name, 'General') AS process_name,
            u.name AS supervisor_name,
+           ap.name AS approver_name,
            COALESCE(l.partial_reject_count, 0) AS partial_rejects,
            COALESCE(l.total_reject_count, 0) AS scrap_rejects,
            l.reject_reason,
-           l.root_cause
+           l.root_cause,
+           mb.batch_code
     FROM daily_reports r
     JOIN machines m ON r.machine_id = m.id
     JOIN users u ON r.supervisor_id = u.id
+    LEFT JOIN users ap ON ap.id = r.approved_by
     LEFT JOIN process_reject_logs l ON l.report_id = r.id
     LEFT JOIN processes p ON l.process_id = p.id
+    LEFT JOIN material_batches mb ON l.batch_id = mb.id
     WHERE 1=1
       " . ($filter['from'] !== '' ? " AND r.report_date >= :date_from" : "") . "
       " . ($filter['to'] !== '' ? " AND r.report_date <= :date_to" : "") . "
@@ -162,7 +363,71 @@ $reports = $stmtReports->fetchAll();
 
 // Fetch active operational machines & processes for dropdowns
 $machines = $db->query("SELECT m.*, p.name AS process_name FROM machines m JOIN processes p ON m.process_id = p.id ORDER BY m.code ASC")->fetchAll();
+
+// v2.3: pending verifications (Manager) + failure reports + electricity log
+$pendingReports = $currentUserRole === 'Manager'
+    ? $db->query("SELECT r.id, r.report_date, r.shift, r.units_produced, r.good_units, u.name AS supervisor_name
+                  FROM daily_reports r JOIN users u ON u.id = r.supervisor_id
+                  WHERE r.approval_status = 'Pending Manager Approval' ORDER BY r.id DESC LIMIT 20")->fetchAll()
+    : [];
+$pendingFailures = in_array($currentUserRole, ['Manager', 'CEO'], true)
+    ? $db->query("SELECT f.*, m.code AS machine_code, u.name AS reporter_name
+                  FROM machine_failures f JOIN machines m ON m.id = f.machine_id JOIN users u ON u.id = f.reported_by
+                  WHERE f.status = 'Pending Verification' ORDER BY f.id DESC LIMIT 20")->fetchAll()
+    : [];
+$failureHistory = $db->query("SELECT f.*, m.code AS machine_code, u.name AS reporter_name
+                  FROM machine_failures f JOIN machines m ON m.id = f.machine_id JOIN users u ON u.id = f.reported_by
+                  ORDER BY f.id DESC LIMIT 10")->fetchAll();
+$electricity = $db->query("SELECT e.*, u.name AS logger_name FROM electricity_readings e JOIN users u ON u.id = e.logged_by ORDER BY e.id DESC LIMIT 10")->fetchAll();
 $processes = $db->query("SELECT * FROM processes WHERE status = 'Active' ORDER BY id ASC")->fetchAll();
+
+// Material batches for the reject-linkage dropdown
+$activeBatches = $db->query("SELECT id, batch_code, material_name FROM material_batches ORDER BY id DESC LIMIT 30")->fetchAll();
+
+// Shift targets: latest effective target per process (item 21)
+$targetsByProcess = [];
+try {
+    $tRows = $db->query("
+        SELECT st.process_id, st.target_per_shift
+        FROM shift_targets st
+        WHERE st.effective_from <= CURRENT_DATE
+          AND st.id = (SELECT MAX(st2.id) FROM shift_targets st2 WHERE st2.process_id = st.process_id AND st2.effective_from <= CURRENT_DATE)
+    ")->fetchAll();
+    foreach ($tRows as $t) {
+        $targetsByProcess[(int)$t['process_id']] = (int)$t['target_per_shift'];
+    }
+} catch (Exception $e) {
+    $targetsByProcess = [];
+}
+
+// Reject cost per unit per process (item 25) for waste-in-shillings
+$rejectCostByProcess = [];
+foreach ($db->query('SELECT id, reject_cost_per_unit FROM processes')->fetchAll() as $pc) {
+    $rejectCostByProcess[(int)$pc['id']] = (float)$pc['reject_cost_per_unit'];
+}
+$rejectMoney = 0.0;
+foreach ($reports as $r) {
+    $cost = $rejectCostByProcess[(int)($r['process_id'] ?? 0)] ?? 0.0;
+    $rejectMoney += $cost * ((int)$r['partial_rejects'] + (int)$r['scrap_rejects']);
+}
+
+// Downtime entries in the current filter window
+$downtimeWhere = "1=1";
+$downtimeArgs = [];
+if ($filter['from'] !== '') { $downtimeWhere .= " AND d.report_date >= :df"; $downtimeArgs[':df'] = $filter['from']; }
+if ($filter['to'] !== '') { $downtimeWhere .= " AND d.report_date <= :dt"; $downtimeArgs[':dt'] = $filter['to']; }
+$stmtDown = $db->prepare("
+    SELECT d.*, m.code AS machine_code, u.name AS recorder_name
+    FROM machine_downtime d
+    JOIN machines m ON d.machine_id = m.id
+    LEFT JOIN users u ON d.recorded_by = u.id
+    WHERE {$downtimeWhere}
+    ORDER BY d.report_date DESC, d.id DESC
+    LIMIT 200
+");
+foreach ($downtimeArgs as $k => $v) { $stmtDown->bindValue($k, $v); }
+$stmtDown->execute();
+$downtime = $stmtDown->fetchAll();
 
 // Aggregate KPIs (split by unit status: completed goods at Cups vs in-process)
 $aggProduced = 0;
@@ -185,7 +450,7 @@ foreach ($reports as $r) {
 $aggYield = $aggProduced > 0 ? round(($aggGood / $aggProduced) * 100, 1) : 0;
 $aggScrapRate = $aggProduced > 0 ? round(($aggScrap / $aggProduced) * 100, 2) : 0;
 
-$showNew = isset($_GET['action']) && $_GET['action'] === 'new' && in_array($currentUserRole, ['Manager', 'CEO'], true);
+$showNew = isset($_GET['action']) && $_GET['action'] === 'new' && in_array($currentUserRole, ['Supervisor', 'CEO'], true); // v2.3.2: Manager verifies, never logs
 
 include __DIR__ . '/components/header.php';
 ?>
@@ -199,6 +464,11 @@ include __DIR__ . '/components/header.php';
         <div style="display:flex; gap:10px; align-items:center;">
             <?php if ($currentUserRole === 'Accountant'): ?>
                 <span class="badge badge-info" style="padding:6px 12px; font-size:12px;">&#128065; Accountant: View Only (expenses are managed in Petty Cash)</span>
+            <?php elseif ($currentUserRole === 'Assistant Manager'): ?>
+                <span class="badge badge-info" style="padding:6px 12px; font-size:12px;">&#128065; Assistant Manager: View Only (reports and monitoring)</span>
+            <?php elseif ($currentUserRole === 'Supervisor' && !$showNew): ?>
+                <a href="/production.php?action=new" class="btn btn-primary">+ Log Shift Report</a>
+                <a href="/production.php#electricity" class="btn btn-secondary">&#9889; Electricity</a>
             <?php elseif (!$showNew): ?>
                 <a href="/production.php?action=new" class="btn btn-primary">+ Log Shift Report</a>
             <?php else: ?>
@@ -219,6 +489,88 @@ include __DIR__ . '/components/header.php';
     ]); ?>
 
     <!-- Summary Performance Cards -->
+    <?php if ($pendingReports): ?>
+    <!-- v2.3: Manager verification worklist -->
+    <div class="card" style="border-left:4px solid #f59e0b; padding:14px 16px; margin-bottom:16px;" id="verifications">
+        <h3 style="font-size:15px; font-weight:800; margin-bottom:8px;">&#128269; Production Logs Awaiting Your Verification (<?= count($pendingReports) ?>)</h3>
+        <p style="font-size:12px; color:var(--text-secondary, #64748b); margin-bottom:10px;">Confirm each entry is authentic before it counts in official records.</p>
+        <?php foreach ($pendingReports as $pr): ?>
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border, #e2e8f0); flex-wrap:wrap;">
+                <div style="font-size:13px;">
+                    <strong>#<?= (int)$pr['id'] ?></strong> &bull; <?= formatDate($pr['report_date']) ?> &bull; <?= htmlspecialchars($pr['shift']) ?> &bull;
+                    <?= formatNumber((int)$pr['units_produced']) ?> processed / <?= formatNumber((int)$pr['good_units']) ?> good &bull; by <strong><?= htmlspecialchars($pr['supervisor_name']) ?></strong>
+                </div>
+                <form method="post" action="/production.php" style="display:inline-flex; gap:6px;">
+                    <input type="hidden" name="action" value="verify_report">
+                    <input type="hidden" name="report_id" value="<?= (int)$pr['id'] ?>">
+                    <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                    <input class="form-control" name="approval_notes" placeholder="Optional note" maxlength="255" style="width:150px; padding:4px 8px; font-size:12px;">
+                    <button class="btn btn-success" name="decision" value="approve" style="font-size:11px; padding:4px 10px;">Verify</button>
+                    <button class="btn btn-danger" name="decision" value="reject" style="font-size:11px; padding:4px 10px;">Reject</button>
+                </form>
+            </div>
+        <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($pendingFailures): ?>
+    <div class="card" style="border-left:4px solid #dc2626; padding:14px 16px; margin-bottom:16px;" id="failures">
+        <h3 style="font-size:15px; font-weight:800; margin-bottom:8px;">&#9888;&#65039; Machine Failures Awaiting Verification (<?= count($pendingFailures) ?>)</h3>
+        <?php foreach ($pendingFailures as $pf): ?>
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border, #e2e8f0); flex-wrap:wrap;">
+                <div style="font-size:13px;">
+                    <strong><?= htmlspecialchars($pf['machine_code']) ?></strong> &bull; <?= htmlspecialchars($pf['failure_reason']) ?> &bull; reported by <?= htmlspecialchars($pf['reporter_name']) ?> (<?= formatDateTime($pf['reported_at']) ?>)
+                </div>
+                <form method="post" action="/production.php" style="display:inline-flex; gap:6px;">
+                    <input type="hidden" name="action" value="verify_failure">
+                    <input type="hidden" name="failure_id" value="<?= (int)$pf['id'] ?>">
+                    <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                    <input class="form-control" name="manager_notes" placeholder="Optional note" maxlength="255" style="width:150px; padding:4px 8px; font-size:12px;">
+                    <button class="btn btn-success" name="decision" value="confirm" style="font-size:11px; padding:4px 10px;">Confirm</button>
+                    <button class="btn btn-danger" name="decision" value="dismiss" style="font-size:11px; padding:4px 10px;">Dismiss</button>
+                </form>
+            </div>
+        <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($isSup ?? false): ?>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'Supervisor'): ?>
+    <!-- v2.3: Supervisor quick actions -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px;">
+        <details class="card" style="padding:14px 16px;">
+            <summary style="cursor:pointer; font-weight:700; font-size:14px;">&#128295; Report Machine Failure</summary>
+            <form method="post" action="/production.php" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+                <input type="hidden" name="action" value="report_failure">
+                <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                <div><label style="font-size:11px;">Machine *</label>
+                    <select class="form-control" name="machine_id" required>
+                        <?php foreach ($machines as $m): ?><option value="<?= (int)$m['id'] ?>"><?= htmlspecialchars($m['code']) ?> - <?= htmlspecialchars($m['name']) ?></option><?php endforeach; ?>
+                    </select></div>
+                <div style="flex:1; min-width:180px;"><label style="font-size:11px;">Reason *</label><input class="form-control" name="failure_reason" required minlength="3" maxlength="255"></div>
+                <button class="btn btn-danger" type="submit">Send to Manager</button>
+            </form>
+        </details>
+        <details class="card" style="padding:14px 16px;" id="electricity">
+            <summary style="cursor:pointer; font-weight:700; font-size:14px;">&#9889; Log Electricity Usage</summary>
+            <form method="post" action="/production.php" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+                <input type="hidden" name="action" value="log_electricity">
+                <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                <div><label style="font-size:11px;">Date *</label><input class="form-control" type="date" name="reading_date" required value="<?= date('Y-m-d') ?>"></div>
+                <div><label style="font-size:11px;">Shift</label>
+                    <select class="form-control" name="shift">
+                        <option>Morning (06:00 - 14:00)</option><option>Afternoon (14:00 - 22:00)</option><option>Night (22:00 - 06:00)</option>
+                    </select></div>
+                <div><label style="font-size:11px;">kWh *</label><input class="form-control" type="number" step="0.01" min="0.01" name="meter_kwh" required style="width:100px;"></div>
+                <div><label style="font-size:11px;">Units produced</label><input class="form-control" type="number" step="1" min="0" name="units_produced" value="0" style="width:110px;"></div>
+                <button class="btn btn-primary" type="submit">Save</button>
+            </form>
+        </details>
+    </div>
+    <?php endif; ?>
+
     <div class="stats-grid">        <div class="stat-card">
             <div class="stat-header">
                 <span class="stat-title">Completed Goods (Cups)</span>
@@ -257,10 +609,42 @@ include __DIR__ . '/components/header.php';
             </div>
             <div class="stat-value" style="color:var(--danger);"><?= formatNumber($aggScrap) ?> <span style="font-size:14px; color:var(--text-muted);">scrap</span></div>
             <div class="stat-desc">
-                +<?= formatNumber($aggPartial) ?> reworkable units salvageable
+                +<?= formatNumber($aggPartial) ?> reworkable &bull; cost of rejects: <strong><?= formatMoney($rejectMoney) ?></strong>
             </div>
         </div>
     </div>
+
+    <!-- Manager tools: downtime log + shift targets (items 20, 21) -->
+    <?php if (in_array($currentUserRole, ['Manager', 'CEO'], true) && !$showNew): ?>
+    <div class="form-grid" style="margin-bottom:16px;">
+        <div class="card" style="padding:14px 18px; margin:0;">
+            <h4 style="font-size:13px; font-weight:800; margin:0 0 8px;">&#9203; Log Machine Downtime</h4>
+            <form method="POST" action="/production.php" style="display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end;">
+                <input type="hidden" name="action" value="log_downtime">
+                <select name="machine_id" class="form-control" required style="width:130px; padding:5px 8px; font-size:12px;">
+                    <?php foreach ($machines as $m): ?><option value="<?= (int)$m['id'] ?>"><?= htmlspecialchars($m['code']) ?></option><?php endforeach; ?>
+                </select>
+                <input type="date" name="report_date" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>" required class="form-control" style="width:135px; padding:5px 8px; font-size:12px;">
+                <input type="time" name="started_at" required class="form-control" style="width:105px; padding:5px 8px; font-size:12px;">
+                <input type="time" name="ended_at" class="form-control" style="width:105px; padding:5px 8px; font-size:12px;" title="Leave empty if still down">
+                <input type="text" name="reason" placeholder="Reason (e.g. belt snapped)" required class="form-control" style="flex:1; min-width:160px; padding:5px 8px; font-size:12px;" maxlength="255">
+                <button type="submit" class="btn btn-primary btn-sm">Log</button>
+            </form>
+        </div>
+        <div class="card" style="padding:14px 18px; margin:0;">
+            <h4 style="font-size:13px; font-weight:800; margin:0 0 8px;">&#127919; Set Shift Target</h4>
+            <form method="POST" action="/production.php" style="display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end;">
+                <input type="hidden" name="action" value="set_target">
+                <select name="process_id" class="form-control" required style="width:170px; padding:5px 8px; font-size:12px;">
+                    <?php foreach ($processes as $p): ?><option value="<?= (int)$p['id'] ?>"><?= htmlspecialchars($p['name']) ?><?= isset($targetsByProcess[(int)$p['id']]) ? ' (now ' . $targetsByProcess[(int)$p['id']] . ')' : '' ?></option><?php endforeach; ?>
+                </select>
+                <input type="number" name="target_per_shift" min="1" placeholder="Units per shift" required class="form-control" style="width:130px; padding:5px 8px; font-size:12px;">
+                <input type="date" name="effective_from" value="<?= date('Y-m-d') ?>" class="form-control" style="width:135px; padding:5px 8px; font-size:12px;">
+                <button type="submit" class="btn btn-primary btn-sm">Set</button>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <!-- New Shift Report Form -->
     <?php if ($showNew): ?>
@@ -347,10 +731,24 @@ include __DIR__ . '/components/header.php';
                         <span class="form-help">Units processed &minus; rejects &mdash; calculated automatically, no QA field needed</span>
                     </div>
 
-                    <div class="form-group" style="grid-column: 1 / -1;">
+                    <div class="form-group">
+                        <label for="batch_id">Material Batch in Use</label>
+                        <select id="batch_id" name="batch_id" class="form-control">
+                            <option value="0">Not tracked</option>
+                            <?php foreach ($activeBatches as $b): ?>
+                                <option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['batch_code']) ?> &mdash; <?= htmlspecialchars($b['material_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <span class="form-help">Links rejects back to the delivery they came from</span>
+                    </div>
+
+                    <div class="form-group">
                         <label for="reject_reason">Primary Defect / Reject Reason</label>
-                        <input type="text" id="reject_reason" name="reject_reason" placeholder="e.g. Burr formation, dimensional out-of-spec, surface oxidation" value="Dimensional tolerance variation (+0.03mm)" maxlength="255" class="form-control"
-                               data-plaintext>
+                        <select id="reject_reason" name="reject_reason" class="form-control">
+                            <?php foreach (['No rejects', 'Burr formation', 'Dimensional out-of-spec', 'Surface oxidation', 'Cracked / split material', 'Machine misalignment', 'Wrong feedstock (bad batch)', 'Operator error', 'Power interruption', 'Other (see notes)'] as $rrOpt): ?>
+                                <option value="<?= $rrOpt ?>" <?= $rrOpt === 'No rejects' ? 'selected' : '' ?>><?= $rrOpt ?></option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
 
                     <div class="form-group" style="grid-column: 1 / -1;">
@@ -419,6 +817,7 @@ include __DIR__ . '/components/header.php';
                         <th>Partial Rework</th>
                         <th>Total Scrap</th>
                         <th>Defect Reason &amp; Root Cause</th>
+                        <th>Material Batch</th>
                         <th>Supervisor</th>
                     </tr>
                 </thead>
@@ -476,9 +875,52 @@ include __DIR__ . '/components/header.php';
                                     <?php else: ?>
                                         <span style="color:var(--text-subtle);">No defects recorded</span>
                                     <?php endif; ?>
-                                </td>                                <td><?= htmlspecialchars($r['supervisor_name']) ?></td>
+                                </td>
+                                <td>
+                                    <?php if (!empty($r['batch_code'])): ?>
+                                        <span class="mono badge badge-info"><?= htmlspecialchars($r['batch_code']) ?></span>
+                                    <?php else: ?>
+                                        <span style="color:var(--text-subtle);">&mdash;</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= htmlspecialchars($r['supervisor_name']) ?></td>
                             </tr>
                         <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Machine downtime log table -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">Machine Downtime Log</h3>
+                <p class="card-subtitle">Stoppages recorded per machine &mdash; explains low output the same day</p>
+            </div>
+            <span class="badge badge-danger"><?= count($downtime) ?> entries</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table">
+                <thead><tr><th>Date</th><th>Machine</th><th>Shift</th><th>From</th><th>To</th><th>Minutes</th><th>Reason</th><th>Recorded By</th></tr></thead>
+                <tbody>
+                    <?php if (empty($downtime)): ?>
+                        <tr><td colspan="8" class="empty-state">No downtime recorded in this period.</td></tr>
+                    <?php else: ?>
+                        <?php $totalDown = 0; foreach ($downtime as $d): $totalDown += (int)$d['minutes']; ?>
+                            <tr>
+                                <td><?= formatDate($d['report_date']) ?></td>
+                                <td><span class="mono" style="font-weight:700;"><?= htmlspecialchars($d['machine_code']) ?></span></td>
+                                <td><?= htmlspecialchars((string)$d['shift']) ?></td>
+                                <td class="mono"><?= htmlspecialchars($d['started_at']) ?></td>
+                                <td class="mono"><?= htmlspecialchars((string)($d['ended_at'] ?? 'ongoing')) ?></td>
+                                <td><strong><?= (int)$d['minutes'] ?></strong></td>
+                                <td style="max-width:260px; font-size:12.5px;"><?= htmlspecialchars($d['reason']) ?></td>
+                                <td><?= htmlspecialchars($d['recorded_by'] ? '' : '') ?><?= htmlspecialchars((string)($d['recorder_name'] ?? '')) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        <tr style="background:var(--bg-surface-subtle); font-weight:700;"><td colspan="5">TOTAL DOWNTIME</td><td><?= $totalDown ?> min</td><td colspan="2"></td></tr>
                     <?php endif; ?>
                 </tbody>
             </table>

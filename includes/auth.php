@@ -23,15 +23,35 @@ function requireAuth(): void {
         session_destroy();
         commitSessionAndRedirect('/index.php?error=account_banned');
     }
+
+    // Forced password change: accounts on a temporary password may visit
+    // only the change page until they set their own.
+    $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
+    $allowedWhilePending = ['change_password.php', 'logout.php'];
+    if (!empty($_SESSION['pending_password_change']) && !in_array($script, $allowedWhilePending, true)) {
+        commitSessionAndRedirect('/change_password.php');
+    }
 }
 
 /**
- * Enforces Role-Based Access Control matrix.
- * Allowed roles: 'CEO', 'Manager', 'Accountant', 'Procurement Officer'
+ * Role-based access control helpers.
+ *
+ * Role set (v2.3):
+ *   'CEO'                 - owner; sees everything, issues petty cash, approves cash requests,
+ *                           inventory view-only, user management, audit trail, attendance
+ *   'Manager'             - operations oversight; approves production + shipments + inventory
+ *                           requests, cash request workflow, targets; NO inventory access
+ *   'Accountant'          - payments and petty cash ONLY; disburses approved cash requests;
+ *                           no production, no procurement records
+ *   'Procurement Officer' - procures, full inventory control, shipment prep, cash requests
+ *   'Supervisor'          - logs production + electricity + machine failures; requests
+ *                           inventory materials; no money, no inventory stock control
+ *   'Assistant Manager'   - reports viewer, no authority
  */
 function requireRole(array $allowedRoles): void {
     requireAuth();
     
+    global $db; // the 403 page includes header/sidebar which query the DB
     $currentUserRole = $_SESSION['user_role'] ?? '';
     
     if (!in_array($currentUserRole, $allowedRoles, true)) {
@@ -46,6 +66,8 @@ function requireRole(array $allowedRoles): void {
         echo '<div style="display:flex; gap:10px;">';
         if ($currentUserRole === 'Procurement Officer') {
             echo '<a href="/procurement.php" class="btn btn-secondary">&larr; Return to Procurement</a>';
+        } elseif ($currentUserRole === 'Supervisor') {
+            echo '<a href="/production.php" class="btn btn-secondary">&larr; Return to Production</a>';
         } else {
             echo '<a href="/dashboard.php" class="btn btn-secondary">&larr; Return to Dashboard</a>';
         }

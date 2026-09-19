@@ -23,17 +23,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 1. Add New User
     if ($action === 'create_user') {
-        $allowedRoles = ['Procurement Officer', 'Manager', 'Accountant', 'CEO'];
+        $allowedRoles = ['Procurement Officer', 'Supervisor', 'Manager', 'Accountant', 'Assistant Manager', 'CEO'];
 
         $errors = [];
         $name     = normalizePersonName(field_text($errors, 'name', 'Full name', true, 2, 100) ?? '');
-        if ($name !== '' && preg_match("/^[\p{Lu}0-9 .'\-]+$/u", $name) !== 1) {
-            $errors[] = "• Full name must be in CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only).";
+        if ($name !== '' && preg_match("/^[\p{Lu} .'\-]+$/u", $name) !== 1) {
+            $errors[] = "• Full name must be in CAPITAL LETTERS only - letters, spaces, apostrophes, hyphens and dots. No numbers or other characters.";
             $name = '';
         }
         $username = field_username($errors, 'username');
+        $password = field_password($errors, 'password', 'Password', 12);
         $role     = field_choice($errors, 'role', 'Role', $allowedRoles);
-        $password = field_password($errors, 'password');
 
         if ($errors) {
             redirectWithErrors('/users.php?action=new', $errors);
@@ -49,27 +49,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         try {
             $hash = password_hash($password, PASSWORD_BCRYPT);
-            $enc  = encryptPassword($password);
         } catch (RuntimeException $e) {
             setFlash('error', $e->getMessage());
             header('Location: /users.php?action=new');
             exit;
         }
         $stmt = $db->prepare("
-            INSERT INTO users (name, username, password_hash, password_encrypted, role, status, created_at)
-            VALUES (:name, :user, :pass, :enc, :role, 'Active', CURRENT_TIMESTAMP)
+            INSERT INTO users (name, username, password_hash, role, status, must_change_password, created_at)
+            VALUES (:name, :user, :pass, :role, 'Active', 1, CURRENT_TIMESTAMP)
         ");
         $stmt->execute([
             ':name'   => $name,
             ':user'   => $username,
             ':pass'   => $hash,
-            ':enc'    => $enc,
             ':role'   => $role,
         ]);
         $newUid = $db->lastInsertId();
 
-        logAudit($db, 'USER_CREATED', 'USER', $newUid, "Registered user '{$name}' with role '{$role}'");
-        setFlash('success', "User '{$name}' successfully created with role '{$role}'.");
+        logAudit($db, 'USER_CREATED', 'USER', $newUid, "Registered user '{$name}' with role '{$role}' (temporary password - change required at first sign-in)");
+        setFlash('success', "User '{$name}' successfully created with role '{$role}'. They must set their own password at first sign-in.");
         header('Location: /users.php');
         exit;
     }
@@ -144,7 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $targetId    = (int)($_POST['target_user_id'] ?? 0);
 
         $errors = [];
-        $newPassword = field_password($errors, 'new_password', 'New password');
+        $newPassword = field_password($errors, 'new_password', 'New password', 12);
         if ($errors) {
             redirectWithErrors('/users.php', $errors);
         }
@@ -154,15 +152,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $targetUser = $uStmt->fetch();
 
         if ($targetUser) {
+            // v2.2: passwords are never stored reversibly. The CEO sets a
+            // TEMPORARY password which the user must replace at next sign-in.
+            $temporary = 'Temp-' . bin2hex(random_bytes(5));
             try {
-                $upd = $db->prepare("UPDATE users SET password_hash = :h, password_encrypted = :e WHERE id = :id");
-                $upd->execute([
-                    ':h'  => password_hash($newPassword, PASSWORD_BCRYPT),
-                    ':e'  => encryptPassword($newPassword),
-                    ':id' => $targetId,
-                ]);
-                logAudit($db, 'PASSWORD_CHANGED', 'USER', $targetId, "Password of '{$targetUser['name']}' changed by {$currentUserName}");
-                setFlash('success', "Password for '{$targetUser['name']}' has been updated. The new password applies at next sign-in.");
+                $upd = $db->prepare("
+                    UPDATE users
+                    SET password_hash = :h, must_change_password = 1, failed_attempts = 0, locked_until = NULL
+                    WHERE id = :id
+                ");
+                $upd->execute([':h' => password_hash($temporary, PASSWORD_BCRYPT), ':id' => $targetId]);
+                logAudit($db, 'PASSWORD_RESET', 'USER', $targetId, "Password of '{$targetUser['name']}' reset to a temporary password by {$currentUserName} (user must change it at next sign-in)");
+                setFlash('success', "Temporary password for '{$targetUser['name']}': {$temporary} \u2014 share it securely; the user must set their own at next sign-in.");
             } catch (RuntimeException $e) {
                 setFlash('error', $e->getMessage());
             }
@@ -171,23 +172,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // 5. View (Reveal) Password (CEO only) - always audit logged
+    // 5. v2.2: password REVEAL is removed entirely. Passwords are stored
+    // one-way (bcrypt) and can never be shown to anyone, including the CEO.
+    // Use "Reset Password" to issue a temporary password instead.
     if ($action === 'view_password') {
-        $targetId = (int)$_POST['target_user_id'];
-
-        $uStmt = $db->prepare("SELECT * FROM users WHERE id = :id");
-        $uStmt->execute([':id' => $targetId]);
-        $targetUser = $uStmt->fetch();
-
-        if ($targetUser) {
-            $plain = !empty($targetUser['password_encrypted']) ? decryptPassword($targetUser['password_encrypted']) : null;
-            if ($plain !== null) {
-                logAudit($db, 'PASSWORD_VIEWED', 'USER', $targetId, "Password of '{$targetUser['name']}' revealed by {$currentUserName}");
-                setFlash('success', "Password for '{$targetUser['name']}' is: {$plain}");
-            } else {
-                setFlash('error', "No recoverable password is stored for '{$targetUser['name']}' yet. Use Change Password to set one.");
-            }
-        }
+        setFlash('error', 'Passwords can no longer be revealed - they are stored one-way. Use Reset Password to issue a temporary password instead.');
         header('Location: /users.php');
         exit;
     }
@@ -249,9 +238,9 @@ include __DIR__ . '/components/header.php';
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="name">Full Name * <span style="font-weight:500; color:var(--text-muted); font-size:11px;">(in CAPITAL LETTERS)</span></label>
-                        <input type="text" id="name" name="name" required placeholder="e.g. SARAH JENKINS" class="form-control" pattern="[A-Za-z0-9 .'\-]+"
+                        <input type="text" id="name" name="name" required placeholder="e.g. SARAH JENKINS" class="form-control" pattern="[A-Za-z .'\-]+"
                                maxlength="100" data-plaintext data-required-error="Full name is required."
-                               data-pattern-error="Full name must use CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only)."
+                               data-pattern-error="Full name must use CAPITAL LETTERS only - no numbers or other characters."
                                oninput="this.value = this.value.toUpperCase();"                 >
                     </div>
 
@@ -273,8 +262,8 @@ include __DIR__ . '/components/header.php';
 
                     <div class="form-group">
                         <label for="password">Temporary Password *</label>
-                        <input type="password" id="password" name="password" required value="factory123" class="form-control"
-                               minlength="6" maxlength="64" data-required-error="Temporary password is required.">
+                        <input type="password" id="password" name="password" required value="<?= htmlspecialchars('Temp-' . bin2hex(random_bytes(4))) ?>" class="form-control"
+                               minlength="12" maxlength="64" data-required-error="Temporary password is required." placeholder="Minimum 12 characters - user must change it at first sign-in">
                         <span class="form-help">6-64 characters, no spaces. The user can sign in with it immediately.</span>
                     </div>
                 </div>
@@ -292,8 +281,8 @@ include __DIR__ . '/components/header.php';
         <div class="card" style="border: 2px solid #f59e0b;">
             <div class="card-header">
                 <div>
-                    <h3 class="card-title">Change Password &mdash; <?= htmlspecialchars($passwordTarget['name']) ?></h3>
-                    <p class="card-subtitle">The new password applies at next sign-in and is stored both hashed (login) and encrypted (recovery)</p>
+                    <h3 class="card-title">Reset Password &mdash; <?= htmlspecialchars($passwordTarget['name']) ?></h3>
+                    <p class="card-subtitle">Issues a temporary password; the user must set their own at next sign-in. Passwords are never visible afterwards.</p>
                 </div>
                 <a href="/users.php" class="btn btn-secondary btn-sm">&times; Cancel</a>
             </div>
@@ -303,10 +292,10 @@ include __DIR__ . '/components/header.php';
                 <input type="hidden" name="target_user_id" value="<?= (int)$passwordTarget['id'] ?>">
 
                 <div class="form-group">
-                    <label for="new_password">New Password *</label>
-                    <input type="text" id="new_password" name="new_password" required minlength="6" maxlength="64" class="form-control" placeholder="Minimum 6 characters" autocomplete="new-password"
+                    <label for="new_password">Temporary Password *</label>
+                    <input type="text" id="new_password" name="new_password" required minlength="12" maxlength="64" class="form-control" placeholder="Minimum 12 characters - temporary; user changes it at next sign-in" autocomplete="off"
                            data-required-error="New password is required.">
-                    <span class="form-help">Minimum 6 characters, no spaces. You can reveal it later with the &quot;View Password&quot; button.</span>
+                    <span class="form-help">Minimum 12 characters, no spaces. This is a one-time password: the user must replace it with their own at next sign-in, and nobody can view it afterwards.</span>
                 </div>
 
                 <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:10px;">
@@ -346,6 +335,7 @@ include __DIR__ . '/components/header.php';
                             'Manager' => 'badge-warning',
                             'Accountant' => 'badge-success',
                             'Procurement Officer' => 'badge-info',
+                            'Supervisor', 'Assistant Manager' => 'badge-secondary',
                             default => 'badge-secondary',
                         };
                         $isCurrent = $u['id'] == $currentUserId;
@@ -370,14 +360,7 @@ include __DIR__ . '/components/header.php';
                             <td><?= formatDate($u['created_at']) ?></td>
                             <td>
                                 <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                                    <form method="POST" action="/users.php" style="display:inline;">
-                                        <input type="hidden" name="action" value="view_password">
-                                        <input type="hidden" name="target_user_id" value="<?= (int)$u['id'] ?>">
-                                        <button type="submit" class="btn btn-secondary btn-sm" onclick="return confirm('Reveal the password of <?= htmlspecialchars($u['name']) ?>? This action is recorded in the Audit Trail.');">
-                                            View Password
-                                        </button>
-                                    </form>
-                                    <a href="/users.php?action=password&user_id=<?= (int)$u['id'] ?>" class="btn btn-secondary btn-sm">Change Password</a>
+                                    <a href="/users.php?action=password&user_id=<?= (int)$u['id'] ?>" class="btn btn-secondary btn-sm">Reset Password</a>
                                     <?php if (!$isCurrent): ?>
                                         <form method="POST" action="/users.php" style="display:inline;">
                                             <input type="hidden" name="action" value="toggle_status">

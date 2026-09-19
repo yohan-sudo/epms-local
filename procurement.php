@@ -1,15 +1,17 @@
 <?php
 /**
- * U EPMS - Procurement Records Pipeline
+ * U EPMS - Procurement Records Pipeline (v2.3)
  * Complete lifecycle:
- *   1. Procurement Officer SUBMITS what has been procured -> 'Pending Manager Review'
- *   2. Manager REVIEWS it on their dashboard              -> 'Pending Accountant Review' or 'Rejected'
- *   3. Accountant gives FINAL approval                    -> 'Finalized' (locked) or 'Rejected'
+ *   1. Procurement Officer submits what has been procured -> 'Pending Manager Review'
+ *      AND a procurement requisition goes to the C.E.O for authority approval.
+ *   2. C.E.O approves the requisition -> the Officer is cleared to procure.
+ *   3. Manager REVIEWS the record -> FINAL approval ('Finalized') or 'Rejected'
+ *      (v2.3.2: the Accountant never approves procurement - they pay for it
+ *       through the Cash Requests workflow after the Manager's approval)
+ *   4. Accountant gives FINAL approval -> 'Finalized' (locked) or 'Rejected'
+ *   5. Procurement Officer receives the goods INTO INVENTORY (once).
  * Closed records are immutable.
- * Everyone (all roles) can VIEW the pipeline; writes are role-enforced:
- *   - create: Procurement Officer only
- *   - manager decision: Manager only
- *   - accountant decision: Accountant only
+ * Everyone (all roles incl. Supervisor) can VIEW the pipeline; writes are role-enforced.
  * Pure PHP 8.2 & Plain HTML5/CSS3 (Zero Frameworks)
  */
 require_once __DIR__ . '/includes/db.php';
@@ -17,7 +19,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
 require_once __DIR__ . '/components/filter_bar.php';
 
-requireRole(['CEO', 'Manager', 'Accountant', 'Procurement Officer']);
+requireRole(['CEO', 'Manager', 'Accountant', 'Procurement Officer', 'Supervisor']);
 
 $pageTitle = 'Procurement Records';
 $activeNav = 'procurement';
@@ -49,6 +51,12 @@ const PROCUREMENT_CATEGORIES = [
     'Raw Material', 'Tooling', 'Consumables', 'Spare Parts', 'Safety & PPE', 'Logistics & Freight', 'Other',
 ];
 
+// v2.2 (item 35): fixed unit vocabulary so records are comparable across
+// periods and officers - no more free-text units like "kgs" vs "KG" vs "kilos".
+const PROCUREMENT_UNITS = [
+    'kg', 'tonne', 'litre', 'piece', 'bundle', 'packet', 'roll', 'drum', 'service',
+];
+
 // ==================================================================
  // POST actions
 // ==================================================================
@@ -68,7 +76,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $itemName  = field_text($errors, 'item_name', 'Item specification', true, 2, 255) ?? '';
         $category  = field_choice($errors, 'category', 'Category', PROCUREMENT_CATEGORIES) ?? '';
         $quantity  = field_float($errors, 'quantity', 'Quantity', 0.01) ?? 0;
-        $unit      = field_text($errors, 'unit', 'Unit of measure', true, 1, 30) ?? '';
+        $unit      = field_choice($errors, 'unit', 'Unit of measure', PROCUREMENT_UNITS) ?? '';
         $unitCost  = field_float($errors, 'unit_cost', 'Unit price', 1) ?? 0;
         $reqDate   = field_date($errors, 'req_date', 'Procurement date', true, true) ?? date('Y-m-d');
 
@@ -85,8 +93,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt = $db->prepare("
             INSERT INTO procurement_entries
                 (reference_no, submitted_by, supplier, item_name, category,
-                 quantity, unit, unit_cost, total_cost, status, date, created_at)
-            VALUES (:ref, :uid, :supplier, :item, :cat, :qty, :unit, :ucost, :tcost, 'Pending Manager Review', :rdate, CURRENT_TIMESTAMP)
+                 quantity, unit, unit_cost, total_cost, status, requisition_status, date, created_at)
+            VALUES (:ref, :uid, :supplier, :item, :cat, :qty, :unit, :ucost, :tcost, 'Pending Manager Review', 'Pending CEO Approval', :rdate, CURRENT_TIMESTAMP)
         ");
         $stmt->execute([
             ':ref'     => $referenceNo,
@@ -102,9 +110,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
         $newId = (int)$db->lastInsertId();
 
-        logAudit($db, 'PROCUREMENT_SUBMITTED', 'PROCUREMENT', $referenceNo, "Procurement Officer {$currentUserName} submitted procurement record {$referenceNo}: {$quantity} {$unit} of '{$itemName}' from {$supplier} (" . formatMoney($totalCost) . ") - awaiting Manager approval");
-        setFlash('success', "Procurement record {$referenceNo} submitted. It now appears on the Manager's dashboard for approval.");
+        logAudit($db, 'PROCUREMENT_SUBMITTED', 'PROCUREMENT', $referenceNo, "Procurement Officer {$currentUserName} submitted procurement record {$referenceNo}: {$quantity} {$unit} of '{$itemName}' from {$supplier} (" . formatMoney($totalCost) . ") - requisition sent to the C.E.O, record awaiting Manager approval");
+        notifyRoles($db, ['CEO'], 'Procurement requisition awaiting your approval',
+            "{$referenceNo}: {$quantity} {$unit} of {$itemName} from {$supplier} (" . formatMoney($totalCost) . ") - approve so the Procurement Officer can proceed.", '/procurement.php?view_id=' . $newId);
+        setFlash('success', "Procurement record {$referenceNo} submitted. The requisition is with the C.E.O and the record awaits the Manager's review.");
         header('Location: /procurement.php?view_id=' . $newId);
+        exit;
+    }
+
+    // ---- 1b. C.E.O requisition authority gate (CEO only) -----------
+    if ($action === 'requisition_decision') {
+        if ($currentUserRole !== 'CEO') {
+            setFlash('error', 'Only the C.E.O can approve or reject procurement requisitions.');
+            header('Location: /procurement.php');
+            exit;
+        }
+        $poId = (int)($_POST['po_id'] ?? 0);
+        $decision = ($_POST['decision'] ?? '') === 'approve' ? 'approve' : 'reject';
+        $notes = mb_substr(trim((string)($_POST['notes'] ?? '')), 0, 255);
+        $po = $db->query('SELECT * FROM procurement_entries WHERE id = ' . $poId)->fetch();
+        if (!$po) {
+            setFlash('error', 'Procurement record not found.');
+            header('Location: /procurement.php');
+            exit;
+        }
+        if ($po['requisition_status'] !== 'Pending CEO Approval') {
+            setFlash('warning', "Requisition for {$po['reference_no']} is not awaiting your approval (current state: {$po['requisition_status']}).");
+            header('Location: /procurement.php?view_id=' . $poId);
+            exit;
+        }
+        if ($decision === 'approve') {
+            $db->prepare("UPDATE procurement_entries SET requisition_status = 'CEO Approved', requisition_ceo_id = :uid, requisition_ceo_at = CURRENT_TIMESTAMP, requisition_notes = :n WHERE id = :id")
+               ->execute([':uid' => $currentUserId, ':n' => $notes !== '' ? $notes : 'Approved by C.E.O ' . $currentUserName, ':id' => $poId]);
+            logAudit($db, 'REQUISITION_CEO_APPROVED', 'PROCUREMENT', $po['reference_no'], "C.E.O {$currentUserName} approved the procurement requisition for {$po['reference_no']} - the Officer is cleared to procure.");
+            notifyUser($db, (int)$po['submitted_by'], 'Requisition approved - go procure', "Your requisition {$po['reference_no']} (" . formatMoney((float)$po['total_cost']) . ") was approved by the C.E.O. You may proceed to procure.", '/procurement.php?view_id=' . $poId);
+            setFlash('success', "Requisition for {$po['reference_no']} approved - the Procurement Officer is cleared to procure.");
+        } else {
+            $db->prepare("UPDATE procurement_entries SET requisition_status = 'CEO Rejected', requisition_ceo_id = :uid, requisition_ceo_at = CURRENT_TIMESTAMP, requisition_notes = :n, status = 'Rejected', rejection_reason = :n2 WHERE id = :id")
+               ->execute([':uid' => $currentUserId, ':n' => $notes !== '' ? $notes : 'Rejected by C.E.O', ':n2' => $notes !== '' ? $notes : 'Rejected by C.E.O ' . $currentUserName, ':id' => $poId]);
+            logAudit($db, 'REQUISITION_CEO_REJECTED', 'PROCUREMENT', $po['reference_no'], "C.E.O {$currentUserName} rejected the procurement requisition for {$po['reference_no']}.");
+            notifyUser($db, (int)$po['submitted_by'], 'Requisition rejected', "Your requisition {$po['reference_no']} was rejected by the C.E.O" . ($notes !== '' ? ": {$notes}" : '.'), '/procurement.php?view_id=' . $poId);
+            setFlash('warning', "Requisition for {$po['reference_no']} rejected.");
+        }
+        header('Location: /procurement.php?view_id=' . $poId);
+        exit;
+    }
+
+    // ---- 1c. Receive finalized goods into inventory (PO only) ------
+    if ($action === 'receive_to_inventory') {
+        if ($currentUserRole !== 'Procurement Officer') {
+            setFlash('error', 'Only the Procurement Officer receives procured materials into inventory.');
+            header('Location: /procurement.php');
+            exit;
+        }
+        $poId = (int)($_POST['po_id'] ?? 0);
+        $po = $db->query('SELECT * FROM procurement_entries WHERE id = ' . $poId)->fetch();
+        if (!$po || $po['status'] !== 'Finalized' || (int)$po['inventory_received'] === 1) {
+            setFlash('error', 'Only finalized, not-yet-received procurement records can be received into inventory.');
+            header('Location: /procurement.php?view_id=' . $poId);
+            exit;
+        }
+        try {
+            $db->beginTransaction();
+            $existing = $db->prepare('SELECT * FROM inventory_items WHERE item_name = :n AND is_finished_goods = 0 LIMIT 1');
+            $existing->execute([':n' => $po['item_name']]);
+            $item = $existing->fetch();
+            if ($item) {
+                $db->prepare('UPDATE inventory_items SET quantity = quantity + :q WHERE id = :i')->execute([':q' => $po['quantity'], ':i' => (int)$item['id']]);
+                $itemId = (int)$item['id'];
+            } else {
+                $code = 'INV-' . strtoupper(bin2hex(random_bytes(3)));
+                $ins = $db->prepare("INSERT INTO inventory_items (item_code, item_name, unit, quantity, reorder_level, unit_cost, is_finished_goods, created_by)
+                                     VALUES (:c, :n, :u, :q, 0, :uc, 0, :by)");
+                $ins->execute([':c' => $code, ':n' => $po['item_name'], ':u' => $po['unit'], ':q' => $po['quantity'], ':uc' => $po['unit_cost'], ':by' => $currentUserId]);
+                $itemId = (int)$db->lastInsertId();
+            }
+            $db->prepare("INSERT INTO inventory_transactions (item_id, txn_type, quantity, reference, note, performed_by, txn_date)
+                         VALUES (:i, 'stock_in', :q, :ref, 'Received from procurement', :by, CURRENT_DATE)")
+               ->execute([':i' => $itemId, ':q' => $po['quantity'], ':ref' => $po['reference_no'], ':by' => $currentUserId]);
+            $db->prepare('UPDATE procurement_entries SET inventory_received = 1 WHERE id = :id')->execute([':id' => $poId]);
+            logAudit($db, 'PROCUREMENT_RECEIVED_TO_INVENTORY', 'PROCUREMENT', $po['reference_no'], "{$po['quantity']} {$po['unit']} of '{$po['item_name']}' from {$po['reference_no']} received into inventory by {$currentUserName}.");
+            $db->commit();
+            notifyRoles($db, ['CEO'], 'Materials received into inventory', "{$po['reference_no']}: {$po['quantity']} {$po['unit']} of {$po['item_name']} now in inventory.", '/inventory.php');
+            setFlash('success', "{$po['reference_no']} received into inventory.");
+        } catch (Exception $e) {
+            if ($db->inTransaction()) { $db->rollBack(); }
+            error_log('[EPMS procurement] receive: ' . $e->getMessage());
+            setFlash('error', 'Could not receive into inventory. Please try again.');
+        }
+        header('Location: /procurement.php?view_id=' . $poId);
         exit;
     }
 
@@ -157,9 +251,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($decision === 'approve') {
+            // v2.3.2: the Manager's approval is FINAL. The Accountant does not
+            // approve procurement - they arrange payment via Cash Requests.
             $stmt = $db->prepare("
                 UPDATE procurement_entries
-                SET status = 'Pending Accountant Review',
+                SET status = 'Finalized',
                     manager_approved_by = :uid,
                     manager_approved_at = CURRENT_TIMESTAMP,
                     manager_notes = :notes,
@@ -168,11 +264,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ");
             $stmt->execute([
                 ':uid'   => $currentUserId,
-                ':notes' => $notes !== '' ? $notes : 'Approved by Manager ' . $currentUserName,
+                ':notes' => $notes !== '' ? $notes : 'Final approval by Manager ' . $currentUserName,
                 ':id'    => $poId,
             ]);
-            logAudit($db, 'PROCUREMENT_MANAGER_APPROVED', 'PROCUREMENT', $po['reference_no'], "Manager {$currentUserName} approved procurement record {$po['reference_no']} (" . formatMoney((float)$po['total_cost']) . ") - forwarded to the Accountant for final approval");
-            setFlash('success', "Procurement record {$po['reference_no']} approved. It now goes to the Accountant for final approval.");
+            logAudit($db, 'PROCUREMENT_MANAGER_APPROVED', 'PROCUREMENT', $po['reference_no'], "Manager {$currentUserName} gave FINAL approval to procurement record {$po['reference_no']} (" . formatMoney((float)$po['total_cost']) . ") - closed, locked, and ready for payment via Cash Requests");
+            notifyRoles($db, ['Procurement Officer'], 'Procurement approved - payment next', "{$po['reference_no']} (" . formatMoney((float)$po['total_cost']) . ") was finally approved by the Manager. Request cash from the C.E.O to pay the supplier.", '/cash_requests.php');
+            setFlash('success', "Procurement record {$po['reference_no']} FINALIZED. The Procurement Officer can receive it into inventory and request payment via Cash Requests.");
         } else {
             $stmt = $db->prepare("
                 UPDATE procurement_entries
@@ -192,89 +289,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // ---- 3. Accountant final decision (Accountant only) ------------
+    // ---- 3. Accountant decision REMOVED (v2.3.2) -------------------
+    // The Accountant never approves procurement: their role is to PAY for
+    // approved purchases via the cash-request workflow. The Manager's
+    // approval is final; the record then goes Finalized -> inventory.
     if ($action === 'accountant_decision') {
-        if ($currentUserRole !== 'Accountant') {
-            setFlash('error', 'Final approval is reserved for the Accountant role. Your role has view access only on this module.');
-            header('Location: /procurement.php');
-            exit;
-        }
-
-        $poId     = (int)($_POST['po_id'] ?? 0);
-        $decision = $_POST['decision'] ?? '';
-        $notes    = trim((string)($_POST['notes'] ?? ''));
-
-        $errors = [];
-        if ($decision !== 'approve' && $decision !== 'reject') {
-            $errors[] = '• A valid decision (approve or reject) is required.';
-        }
-        $notes = field_text($errors, 'notes', 'Decision notes', false, 0, 500) ?? '';
-
-        if ($errors) {
-            redirectWithErrors('/procurement.php', $errors);
-        }
-
-        if ($decision === 'reject' && $notes === '') {
-            $notes = 'Rejected by Accountant.';
-        }
-
-        $poStmt = $db->prepare("SELECT * FROM procurement_entries WHERE id = :id");
-        $poStmt->execute([':id' => $poId]);
-        $po = $poStmt->fetch();
-
-        if (!$po) {
-            setFlash('error', 'Procurement record not found.');
-            header('Location: /procurement.php');
-            exit;
-        }
-
-        if (!$isOpenStatus($po['status'])) {
-            setFlash('warning', "Procurement record {$po['reference_no']} has already been closed ({$po['status']}) and can no longer be decided on.");
-            header('Location: /procurement.php?view_id=' . $poId);
-            exit;
-        }
-
-        if ($po['status'] !== 'Pending Accountant Review') {
-            setFlash('warning', "Procurement record {$po['reference_no']} is not awaiting Accountant review (current stage: {$po['status']}). The Manager must approve it first.");
-            header('Location: /procurement.php?view_id=' . $poId);
-            exit;
-        }
-
-        if ($decision === 'approve') {
-            $stmt = $db->prepare("
-                UPDATE procurement_entries
-                SET status = 'Finalized',
-                    accountant_approved_by = :uid,
-                    accountant_approved_at = CURRENT_TIMESTAMP,
-                    accountant_notes = :notes,
-                    rejection_reason = NULL
-                WHERE id = :id
-            ");
-            $stmt->execute([
-                ':uid'   => $currentUserId,
-                ':notes' => $notes !== '' ? $notes : 'Final approval by Accountant ' . $currentUserName,
-                ':id'    => $poId,
-            ]);
-            logAudit($db, 'PROCUREMENT_FINALIZED', 'PROCUREMENT', $po['reference_no'], "Accountant {$currentUserName} gave final approval to procurement record {$po['reference_no']} (" . formatMoney((float)$po['total_cost']) . ") - closed and locked");
-            setFlash('success', "Procurement record {$po['reference_no']} finalized. The Accountant is the final approver - the record is now locked.");
-        } else {
-            $stmt = $db->prepare("
-                UPDATE procurement_entries
-                SET status = 'Rejected',
-                    accountant_approved_by = :uid,
-                    accountant_approved_at = CURRENT_TIMESTAMP,
-                    accountant_notes = :notes,
-                    rejection_reason = :reason
-                WHERE id = :id
-            ");
-            $stmt->execute([':uid' => $currentUserId, ':notes' => $notes, ':reason' => $notes, ':id' => $poId]);
-            logAudit($db, 'PROCUREMENT_ACCOUNTANT_REJECTED', 'PROCUREMENT', $po['reference_no'], "Accountant {$currentUserName} rejected procurement record {$po['reference_no']}: {$notes}");
-            setFlash('warning', "Procurement record {$po['reference_no']} was rejected.");
-        }
-
-        header('Location: /procurement.php?view_id=' . $poId);
+        setFlash('error', 'Procurement approval is not the Accountant\'s role. Payments are handled through Cash Requests after the Manager\'s approval.');
+        header('Location: /procurement.php');
         exit;
     }
+    // (retired Accountant approval block removed in v2.3.2)
 
     // ---- Unknown action -------------------------------------------
     setFlash('error', 'Unknown procurement action.');
@@ -412,11 +436,11 @@ include __DIR__ . '/components/header.php';
 
         <div class="stat-card">
             <div class="stat-header">
-                <span class="stat-title">Awaiting Accountant</span>
-                <span style="font-size:18px;">&#9203;</span>
+                <span class="stat-title">Approved (payment pending)</span>
+                <span style="font-size:18px;">&#128176;</span>
             </div>
-            <div class="stat-value" style="color:var(--primary);"><?= $pendingAccountantCount ?></div>
-            <div class="stat-desc">Manager-approved, awaiting final approval</div>
+            <div class="stat-value" style="color:var(--primary);"><?= $finalizedReqCount ?></div>
+            <div class="stat-desc">Finally approved - the Accountant arranges payment via Cash Requests</div>
         </div>
 
         <div class="stat-card">
@@ -481,8 +505,11 @@ include __DIR__ . '/components/header.php';
 
                     <div class="form-group">
                         <label for="unit">Unit of Measure *</label>
-                        <input type="text" id="unit" name="unit" required placeholder="e.g. Pieces, Bundles, kg" class="form-control"
-                               minlength="1" maxlength="30" data-required-error="Unit of measure is required.">
+                        <select id="unit" name="unit" class="form-control" required data-required-error="Unit of measure is required.">
+                            <?php foreach (PROCUREMENT_UNITS as $u): ?>
+                                <option value="<?= htmlspecialchars($u) ?>"><?= htmlspecialchars($u) ?></option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
 
                     <div class="form-group">
@@ -532,9 +559,6 @@ include __DIR__ . '/components/header.php';
         $canManagerDecide = $isOpenStatus($viewItem['status'])
             && $currentUserRole === 'Manager'
             && in_array($viewItem['status'], ['Pending Manager Review', 'Pending Approval'], true);
-        $canAccountantDecide = $isOpenStatus($viewItem['status'])
-            && $currentUserRole === 'Accountant'
-            && $viewItem['status'] === 'Pending Accountant Review';
         ?>
         <div class="card" style="border: 2px solid #3b82f6; background-color: #ffffff;">
             <div class="card-header">
@@ -586,6 +610,26 @@ include __DIR__ . '/components/header.php';
 
             <!-- Approval Notes History -->
             <div style="margin: 18px 0; display:flex; flex-direction:column; gap:10px;">
+                <?php if (!empty($viewItem['requisition_status'])): ?>
+                    <?php $reqBadge = $viewItem['requisition_status'] === 'CEO Approved' ? 'badge-success' : ($viewItem['requisition_status'] === 'CEO Rejected' ? 'badge-danger' : 'badge-warning'); ?>
+                    <div style="padding:10px 14px; background:#fefce8; border-left:4px solid #eab308; border-radius:4px;">
+                        <strong>Procurement Requisition (authority to procure):</strong>
+                        <span class="badge <?= $reqBadge ?>" style="margin-left:6px; font-size:10px; vertical-align:middle;">
+                            <?= $viewItem['requisition_status'] === 'CEO Approved' ? 'Approved by C.E.O' : ($viewItem['requisition_status'] === 'CEO Rejected' ? 'Rejected by C.E.O' : 'Awaiting C.E.O approval') ?>
+                        </span>
+                        <?php if ($viewItem['requisition_notes']): ?><p style="margin-top:2px; font-size:13px;"><?= htmlspecialchars($viewItem['requisition_notes']) ?></p><?php endif; ?>
+                        <?php if ($currentUserRole === 'CEO' && $viewItem['requisition_status'] === 'Pending CEO Approval'): ?>
+                            <form method="POST" action="/procurement.php" style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                                <input type="hidden" name="action" value="requisition_decision">
+                                <input type="hidden" name="po_id" value="<?= (int)$viewItem['id'] ?>">
+                                <input class="form-control" type="text" name="notes" placeholder="Optional remarks" maxlength="255" style="flex:1; min-width:180px;">
+                                <button type="submit" name="decision" value="approve" class="btn btn-success">&#10003; Approve requisition</button>
+                                <button type="submit" name="decision" value="reject" class="btn btn-danger">&#10007; Reject</button>
+                            </form>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
+
                 <?php if ($viewItem['manager_notes']): ?>
                     <div style="padding:10px 14px; background:#eff6ff; border-left:4px solid #3b82f6; border-radius:4px;">
                         <strong>Manager Review:</strong>
@@ -628,6 +672,18 @@ include __DIR__ . '/components/header.php';
                         </div>
                     </form>
                 </div>
+            <?php elseif ($currentUserRole === 'Procurement Officer' && $viewItem['status'] === 'Finalized' && (int)$viewItem['inventory_received'] === 0): ?>
+                <div style="padding:16px; background:#f0fdf4; border:1px solid #86efac; border-radius:var(--radius-md); margin-top:16px;">
+                    <h4 style="font-size:14px; font-weight:700; margin-bottom:8px;">Receive into Inventory</h4>
+                    <p style="font-size:13px; margin-bottom:10px;">This record is finalized. Receive the goods into inventory so they become available to the floor.</p>
+                    <form method="POST" action="/procurement.php">
+                        <input type="hidden" name="action" value="receive_to_inventory">
+                        <input type="hidden" name="po_id" value="<?= (int)$viewItem['id'] ?>">
+                        <button type="submit" class="btn btn-success">&#128230; Receive <?= htmlspecialchars($viewItem['quantity'] . ' ' . $viewItem['unit']) ?> into inventory</button>
+                    </form>
+                </div>
+            <?php elseif ($viewItem['status'] === 'Finalized' && (int)$viewItem['inventory_received'] === 1): ?>
+                <div class="alert alert-success" style="margin-top:16px;">&#128230; Received into inventory.</div>
             <?php elseif ($canAccountantDecide): ?>
                 <div style="padding:16px; background:#f8fafc; border:1px solid #cbd5e1; border-radius:var(--radius-md); margin-top:16px;">
                     <h4 style="font-size:14px; font-weight:700; margin-bottom:8px;">Accountant Final Approval (closes &amp; locks the record)</h4>
@@ -647,15 +703,11 @@ include __DIR__ . '/components/header.php';
                 </div>
             <?php elseif ($viewItem['status'] === 'Finalized'): ?>
                 <div class="alert alert-success" style="margin-top:16px; margin-bottom:0;">
-                    <span>&#10003; Fully approved: Manager &rarr; Accountant (final). This record is locked against further modification.</span>
+                    <span>&#10003; Finally approved by the Manager. This record is locked. Payment is arranged by the Accountant through <a href="/cash_requests.php">Cash Requests</a>.</span>
                 </div>
             <?php elseif ($viewItem['status'] === 'Rejected'): ?>
                 <div class="alert alert-warning" style="margin-top:16px; margin-bottom:0;">
                     <span>&#10007; This record was rejected and is closed.</span>
-                </div>
-            <?php elseif ($canManagerDecide === false && $viewItem['status'] === 'Pending Accountant Review' && $currentUserRole !== 'Accountant'): ?>
-                <div class="alert alert-info" style="margin-top:16px; margin-bottom:0;">
-                    <span>&#9203; Manager approved &mdash; awaiting the Accountant's final approval.</span>
                 </div>
             <?php elseif ($isOpenStatus($viewItem['status'])): ?>
                 <div class="alert alert-info" style="margin-top:16px; margin-bottom:0;">
@@ -672,8 +724,7 @@ include __DIR__ . '/components/header.php';
                 <a href="/procurement.php?filter=all" class="btn btn-sm <?= $statusFilter === 'all' ? 'btn-primary' : 'btn-secondary' ?>">All (<?= count($requisitions) ?>)</a>
                 <a href="/procurement.php?filter=pending" class="btn btn-sm <?= $statusFilter === 'pending' ? 'btn-primary' : 'btn-secondary' ?>">Open</a>
                 <a href="/procurement.php?filter=manager" class="btn btn-sm <?= $statusFilter === 'manager' ? 'btn-primary' : 'btn-secondary' ?>">Awaiting Manager</a>
-                <a href="/procurement.php?filter=accountant" class="btn btn-sm <?= $statusFilter === 'accountant' ? 'btn-primary' : 'btn-secondary' ?>">Awaiting Accountant</a>
-                <a href="/procurement.php?filter=finalized" class="btn btn-sm <?= $statusFilter === 'finalized' ? 'btn-primary' : 'btn-secondary' ?>">Finalized</a>
+                <a href="/procurement.php?filter=finalized" class="btn btn-sm <?= $statusFilter === 'finalized' ? 'btn-primary' : 'btn-secondary' ?>">Approved</a>
                 <a href="/procurement.php?filter=rejected" class="btn btn-sm <?= $statusFilter === 'rejected' ? 'btn-primary' : 'btn-secondary' ?>">Rejected</a>
             </div>
             <div style="font-size:12px; color:var(--text-subtle);">
@@ -727,17 +778,7 @@ include __DIR__ . '/components/header.php';
                                                 <input type="hidden" name="po_id" value="<?= (int)$po['id'] ?>">
                                                 <input type="hidden" name="notes" value="">
                                                 <button type="submit" name="decision" value="approve" class="btn btn-success btn-sm"
-                                                        onclick="return confirm('Approve procurement record <?= htmlspecialchars($po['reference_no']) ?> and forward it to the Accountant?');">&#10003;</button>
-                                                <button type="submit" name="decision" value="reject" class="btn btn-danger btn-sm"
-                                                        onclick="return confirm('Reject procurement record <?= htmlspecialchars($po['reference_no']) ?>? A rejection reason will be recorded.');">&#10007;</button>
-                                            </form>
-                                        <?php elseif ($currentUserRole === 'Accountant' && $po['status'] === 'Pending Accountant Review'): ?>
-                                            <form method="POST" action="/procurement.php" style="display:inline;">
-                                                <input type="hidden" name="action" value="accountant_decision">
-                                                <input type="hidden" name="po_id" value="<?= (int)$po['id'] ?>">
-                                                <input type="hidden" name="notes" value="">
-                                                <button type="submit" name="decision" value="approve" class="btn btn-success btn-sm"
-                                                        onclick="return confirm('Give FINAL approval to procurement record <?= htmlspecialchars($po['reference_no']) ?> for <?= formatMoney((float)$po['total_cost']) ?>? This locks the record.');">&#10003;</button>
+                                                        onclick="return confirm('Give FINAL approval to procurement record <?= htmlspecialchars($po['reference_no']) ?>? This locks the record and clears it for payment.');">&#10003;</button>
                                                 <button type="submit" name="decision" value="reject" class="btn btn-danger btn-sm"
                                                         onclick="return confirm('Reject procurement record <?= htmlspecialchars($po['reference_no']) ?>? A rejection reason will be recorded.');">&#10007;</button>
                                             </form>

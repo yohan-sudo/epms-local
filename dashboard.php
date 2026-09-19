@@ -61,11 +61,11 @@ $finalizedPoTotal = (float)$db->query("SELECT COALESCE(SUM(total_cost), 0) FROM 
 $rejectedPoCount = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE status = 'Rejected'")->fetchColumn();
 
 // Procurement records awaiting MY stage of approval (role-specific worklist)
+// v2.3.2: ONLY the Manager approves procurement (their approval is final).
+// The Accountant pays for approved purchases via Cash Requests instead.
 $myApprovalStage = null;
 if ($currentUserRole === 'Manager') {
     $myApprovalStage = "p.status IN ('Pending Manager Review', 'Pending Approval')";
-} elseif ($currentUserRole === 'Accountant') {
-    $myApprovalStage = "p.status = 'Pending Accountant Review'";
 }
 $myApprovals = [];
 if ($myApprovalStage !== null) {
@@ -114,6 +114,68 @@ if ($canViewAudit) {
     ")->fetchAll();
 }
 
+// ---- v2.2 dashboard additions ----
+// Revenue & receivables (dispatches)
+$revenueTotal = (float)$db->query('SELECT COALESCE(SUM(total_amount),0) FROM dispatches')->fetchColumn();
+$revenuePaid  = (float)$db->query('SELECT COALESCE(SUM(amount_paid),0) FROM dispatches')->fetchColumn();
+$receivables  = max(0, $revenueTotal - $revenuePaid);
+
+// Money out: finalized purchases + petty cash expenses
+$purchaseSpend = $finalizedPoTotal;
+$pettySpend = (float)$db->query('SELECT COALESCE(SUM(amount),0) FROM petty_cash_expenses')->fetchColumn();
+$rejectCostTotal = (float)$db->query(
+    'SELECT COALESCE(SUM(pc.reject_cost_per_unit * (l.partial_reject_count + l.total_reject_count)),0)
+     FROM process_reject_logs l JOIN processes pc ON l.process_id = pc.id'
+)->fetchColumn();
+$netPosition = $revenuePaid - $purchaseSpend - $pettySpend;
+
+// Monthly petty cash budget usage
+$pcBudget = (float)getSetting($db, 'petty_cash_monthly_budget', '10000000');
+$pcMonthIssued = (float)$db->query("SELECT COALESCE(SUM(amount),0) FROM petty_cash_issuances WHERE status IN ('Active','Pending Countersign') AND issued_date >= '" . date('Y-m-01') . "'")->fetchColumn();
+$pcBudgetPct = $pcBudget > 0 ? round($pcMonthIssued / $pcBudget * 100) : 0;
+
+// My unread notifications
+$myNotifications = [];
+try {
+    $stmtN = $db->prepare('SELECT * FROM notifications WHERE user_id = :u ORDER BY id DESC LIMIT 5');
+    $stmtN->execute([':u' => $currentUserId]);
+    $myNotifications = $stmtN->fetchAll();
+} catch (Exception $e) {
+    $myNotifications = [];
+}
+
+// Pending petty cash requests awaiting CEO verification
+$pendingPcRequests = (int)$db->query("SELECT COUNT(*) FROM petty_cash_requests WHERE status = 'Pending CEO Verification'")->fetchColumn();
+$floatsToCountersign = (int)$db->query("SELECT COUNT(*) FROM petty_cash_issuances WHERE status = 'Pending Countersign'")->fetchColumn();
+
+// Machine downtime today
+$downtimeToday = (int)$db->query("SELECT COALESCE(SUM(minutes),0) FROM machine_downtime WHERE report_date = '" . date('Y-m-d') . "'")->fetchColumn();
+
+// Approval aging: oldest open procurement request (item 9)
+$oldestPending = $db->query("SELECT DATEDIFF(CURRENT_DATE, MIN(date)) AS days FROM procurement_entries WHERE status NOT IN ('Finalized','Rejected')")->fetchColumn();
+
+// ---- v2.3 dashboard additions: new workflow queues ----
+// CEO: requisitions + corrections + cash requests awaiting them
+$ceoRequisitions = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE requisition_status = 'Pending CEO Approval'")->fetchColumn();
+$ceoCorrections = (int)$db->query("SELECT COUNT(*) FROM correction_requests WHERE status = 'Pending CEO Approval'")->fetchColumn();
+$ceoCashRequests = (int)$db->query("SELECT COUNT(*) FROM cash_requests WHERE status = 'Pending CEO Approval'")->fetchColumn();
+// Manager: production verifications + inventory requests + shipments
+$mgrVerifyReports = (int)$db->query("SELECT COUNT(*) FROM daily_reports WHERE approval_status = 'Pending Manager Approval'")->fetchColumn();
+$mgrInvRequests = (int)$db->query("SELECT COUNT(*) FROM inventory_requests WHERE status = 'Pending Manager Approval'")->fetchColumn();
+$mgrShipments = (int)$db->query("SELECT COUNT(*) FROM shipment_orders WHERE status = 'Prepared - Awaiting Manager Approval'")->fetchColumn();
+$mgrFailures = (int)$db->query("SELECT COUNT(*) FROM machine_failures WHERE status = 'Pending Verification'")->fetchColumn();
+// Accountant: cash to disburse (their ONLY new duty)
+$accToDisburse = (int)$db->query("SELECT COUNT(*) FROM cash_requests WHERE status = 'Approved - Sent to Accountant'")->fetchColumn();
+// PO: requisitions awaiting CEO + shipments to prepare + releases
+$poAwaitingCeo = (int)$db->query("SELECT COUNT(*) FROM procurement_entries WHERE submitted_by = " . (int)$currentUserId . " AND requisition_status = 'Pending CEO Approval'")->fetchColumn();
+$poShipments = (int)$db->query("SELECT COUNT(*) FROM shipment_orders WHERE status = 'Requested by CEO'")->fetchColumn();
+$poReleases = (int)$db->query("SELECT COUNT(*) FROM inventory_requests WHERE status = 'Approved - Awaiting Release'")->fetchColumn();
+// Supervisor: my pending verifications + releases to confirm
+$supPendingVerify = (int)$db->query("SELECT COUNT(*) FROM daily_reports WHERE supervisor_id = " . (int)$currentUserId . " AND approval_status = 'Pending Manager Approval'")->fetchColumn();
+$supAwaitReceipt = (int)$db->query("SELECT COUNT(*) FROM inventory_requests WHERE requested_by = " . (int)$currentUserId . " AND status = 'Released - Awaiting Confirmation'")->fetchColumn();
+// Everyone: workers present today (CEO + Manager see attendance)
+$presentToday = (int)$db->query('SELECT COUNT(DISTINCT worker_id) FROM worker_attendance WHERE attend_date = CURRENT_DATE')->fetchColumn();
+
 include __DIR__ . '/components/header.php';
 ?>
 
@@ -125,13 +187,14 @@ include __DIR__ . '/components/header.php';
         </div>
         <div style="display:flex; gap:10px;">
             <?php if ($currentUserRole === 'Manager'): ?>
-                <a href="/production.php?action=new" class="btn btn-primary">+ Submit Shift Report</a>
-                <a href="/petty_cash.php?action=expense" class="btn btn-secondary">+ Record Expense</a>
+                <a href="/production.php" class="btn btn-primary">&#128269; Verify Production Logs</a>
             <?php elseif ($currentUserRole === 'Accountant'): ?>
-                <a href="/petty_cash.php?action=expense" class="btn btn-primary">+ Record Expense</a>
+                <a href="/cash_requests.php" class="btn btn-primary">&#128176; Cash Requests to Pay</a>
             <?php elseif ($currentUserRole === 'CEO'): ?>
                 <a href="/petty_cash.php?action=issue" class="btn btn-primary">+ Issue Petty Cash Float</a>
                 <a href="/users.php" class="btn btn-secondary">Manage Users</a>
+            <?php elseif ($currentUserRole === 'Supervisor'): ?>
+                <a href="/production.php?action=new" class="btn btn-primary">+ Log Shift Report</a>
             <?php endif; ?>
         </div>
     </div>
@@ -185,24 +248,138 @@ include __DIR__ . '/components/header.php';
         </div>
     </div>
 
-    <!-- My Procurement Approvals (Manager & Accountant only) -->
+    <!-- v2.2: Finance & Attention Worklist -->
+    <?php if (in_array($currentUserRole, ['CEO', 'Manager', 'Accountant'], true)): ?>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-header">
+                <span class="stat-title">Revenue Collected</span>
+                <span class="badge badge-success">Dispatches</span>
+            </div>
+            <div class="stat-value"><?= formatMoney($revenuePaid) ?></div>
+            <div class="stat-desc">
+                of <?= formatMoney($revenueTotal) ?> billed
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-header">
+                <span class="stat-title">Customer Debts</span>
+                <span class="badge badge-warning">Receivables</span>
+            </div>
+            <div class="stat-value" style="color:<?= $receivables > 0 ? 'var(--warning)' : 'var(--success)' ?>;">
+                <?= formatMoney($receivables) ?>
+            </div>
+            <div class="stat-desc">
+                unpaid balances on dispatched goods
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-header">
+                <span class="stat-title">Money Out</span>
+                <span class="badge badge-info">Spend</span>
+            </div>
+            <div class="stat-value"><?= formatMoney($purchaseSpend + $pettySpend) ?></div>
+            <div class="stat-desc">
+                <?= formatMoney($purchaseSpend) ?> purchases &bull; <?= formatMoney($pettySpend) ?> petty cash
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-header">
+                <span class="stat-title">Petty Cash Budget</span>
+                <span class="badge <?= $pcBudgetPct >= 100 ? 'badge-danger' : ($pcBudgetPct >= 80 ? 'badge-warning' : 'badge-success') ?>">
+                    <?= $pcBudgetPct ?>% used
+                </span>
+            </div>
+            <div class="stat-value"><?= formatMoney($pcMonthIssued) ?></div>
+            <div class="stat-desc">
+                of <?= formatMoney($pcBudget) ?> this month
+                <?php if ($pcBudgetPct >= 80): ?>
+                    <strong style="color:var(--danger);">&bull; near or over limit</strong>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <?php if ($pcBudgetPct >= 80): ?>
+    <div class="card alert-warning" style="padding:10px 16px; margin-bottom:24px; font-size:13px;">
+        &#9888;&#65039; <strong>Budget alert:</strong> petty cash issued this month is at <?= $pcBudgetPct ?>% of the monthly budget (<?= formatMoney($pcMonthIssued) ?> of <?= formatMoney($pcBudget) ?>).
+    </div>
+    <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'CEO' && ($pendingPcRequests > 0 || $floatsToCountersign > 0)): ?>
+    <div class="card" style="border:2px solid var(--warning); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong>Petty cash needs your action:</strong>
+        <?php if ($pendingPcRequests > 0): ?><?= $pendingPcRequests ?> request<?= $pendingPcRequests > 1 ? 's' : '' ?> awaiting verification<?php endif; ?>
+        <?php if ($pendingPcRequests > 0 && $floatsToCountersign > 0): ?>&bull;<?php endif; ?>
+        <?php if ($floatsToCountersign > 0): ?><?= $floatsToCountersign ?> float<?= $floatsToCountersign > 1 ? 's' : '' ?> awaiting countersignature<?php endif; ?>
+        &mdash; <a href="/petty_cash.php">open Petty Cash</a>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'CEO' && ($ceoRequisitions > 0 || $ceoCorrections > 0 || $ceoCashRequests > 0)): ?>
+    <div class="card" style="border:2px solid var(--warning); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong>Awaiting your approval:</strong>
+        <?php if ($ceoRequisitions > 0): ?><?= $ceoRequisitions ?> procurement requisition(s) - <a href="/procurement.php">decide</a><?php endif; ?>
+        <?php if ($ceoRequisitions > 0 && ($ceoCorrections > 0 || $ceoCashRequests > 0)): ?> &bull; <?php endif; ?>
+        <?php if ($ceoCashRequests > 0): ?><?= $ceoCashRequests ?> cash request(s) - <a href="/cash_requests.php">decide</a><?php endif; ?>
+        <?php if ($ceoCashRequests > 0 && $ceoCorrections > 0): ?> &bull; <?php endif; ?>
+        <?php if ($ceoCorrections > 0): ?><?= $ceoCorrections ?> correction(s) - <a href="/corrections.php">decide</a><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'Manager' && ($mgrVerifyReports > 0 || $mgrInvRequests > 0 || $mgrShipments > 0 || $mgrFailures > 0)): ?>
+    <div class="card" style="border:2px solid var(--warning); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong>Awaiting your approval / verification:</strong>
+        <?php if ($mgrVerifyReports > 0): ?><?= $mgrVerifyReports ?> production log(s) - <a href="/production.php#verifications">verify</a><?php endif; ?>
+        <?php if ($mgrVerifyReports > 0 && ($mgrInvRequests > 0 || $mgrShipments > 0 || $mgrFailures > 0)): ?> &bull; <?php endif; ?>
+        <?php if ($mgrInvRequests > 0): ?><?= $mgrInvRequests ?> material request(s) - <a href="/inventory.php">decide</a><?php endif; ?>
+        <?php if ($mgrInvRequests > 0 && ($mgrShipments > 0 || $mgrFailures > 0)): ?> &bull; <?php endif; ?>
+        <?php if ($mgrShipments > 0): ?><?= $mgrShipments ?> shipment(s) - <a href="/shipments.php">decide</a><?php endif; ?>
+        <?php if ($mgrShipments > 0 && $mgrFailures > 0): ?> &bull; <?php endif; ?>
+        <?php if ($mgrFailures > 0): ?><?= $mgrFailures ?> machine failure report(s) - <a href="/production.php#failures">verify</a><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'Accountant' && $accToDisburse > 0): ?>
+    <div class="card" style="border:2px solid var(--warning); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong><?= $accToDisburse ?> approved cash request(s) to disburse</strong> &mdash; <a href="/cash_requests.php">open Cash Requests</a>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'Procurement Officer' && ($poAwaitingCeo > 0 || $poShipments > 0 || $poReleases > 0)): ?>
+    <div class="card" style="border:2px solid var(--info, #3b82f6); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong>Your queue:</strong>
+        <?php if ($poAwaitingCeo > 0): ?><?= $poAwaitingCeo ?> requisition(s) with the C.E.O<?php endif; ?>
+        <?php if ($poAwaitingCeo > 0 && ($poShipments > 0 || $poReleases > 0)): ?> &bull; <?php endif; ?>
+        <?php if ($poShipments > 0): ?><?= $poShipments ?> shipment(s) to prepare - <a href="/shipments.php">prepare</a><?php endif; ?>
+        <?php if ($poShipments > 0 && $poReleases > 0): ?> &bull; <?php endif; ?>
+        <?php if ($poReleases > 0): ?><?= $poReleases ?> material release(s) - <a href="/inventory.php">release</a><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($currentUserRole === 'Supervisor' && ($supPendingVerify > 0 || $supAwaitReceipt > 0)): ?>
+    <div class="card" style="border:2px solid var(--info, #3b82f6); padding:12px 16px; margin-bottom:24px; font-size:13px;">
+        &#128276; <strong>Your queue:</strong>
+        <?php if ($supPendingVerify > 0): ?><?= $supPendingVerify ?> log(s) awaiting the Manager's verification<?php endif; ?>
+        <?php if ($supPendingVerify > 0 && $supAwaitReceipt > 0): ?> &bull; <?php endif; ?>
+        <?php if ($supAwaitReceipt > 0): ?><?= $supAwaitReceipt ?> material release(s) to confirm - <a href="/inventory.php">confirm receipt</a><?php endif; ?>
+    </div>
+    <?php endif; ?>
+
+    <!-- My Procurement Approvals (Manager only - final approver) -->
     <?php if ($myApprovalStage !== null): ?>
     <div class="card" style="<?= empty($myApprovals) ? 'margin-bottom:24px;' : 'border:2px solid var(--warning); margin-bottom:24px;' ?>">
         <div class="card-header">
             <div>
                 <h3 class="card-title">
-                    <?php if ($currentUserRole === 'Manager'): ?>
-                        Procurement Awaiting Your Approval
-                    <?php else: ?>
-                        Procurement Awaiting Your Final Approval
-                    <?php endif; ?>
+                    Procurement Awaiting Your Approval
                 </h3>
                 <p class="card-subtitle">
-                    <?php if ($currentUserRole === 'Manager'): ?>
-                        Submitted by the Procurement Officer &mdash; your approval forwards each record to the Accountant
-                    <?php else: ?>
-                        Manager-approved records &mdash; you are the final approver; approval locks the record
-                    <?php endif; ?>
+                    Submitted by the Procurement Officer &mdash; your approval is FINAL and locks the record (the Accountant arranges payment separately via Cash Requests)
                 </p>
             </div>
             <a href="/procurement.php" class="btn btn-secondary btn-sm">Open Procurement Records &rarr;</a>
@@ -239,7 +416,7 @@ include __DIR__ . '/components/header.php';
                             <td>
                                 <div style="display:flex; gap:6px; align-items:center;">
                                     <form method="POST" action="/procurement.php" style="display:inline;">
-                                        <input type="hidden" name="action" value="<?= $currentUserRole === 'Manager' ? 'manager_decision' : 'accountant_decision' ?>">
+                                        <input type="hidden" name="action" value="manager_decision">
                                         <input type="hidden" name="po_id" value="<?= (int)$po['id'] ?>">
                                         <input type="hidden" name="notes" value="">
                                         <button type="submit" name="decision" value="approve" class="btn btn-success btn-sm"
@@ -402,6 +579,34 @@ include __DIR__ . '/components/header.php';
             </table>
         </div>
     </div>
+
+    <!-- Notifications (all roles) -->
+    <?php if (!empty($myNotifications)): ?>
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">&#128276; My Notifications</h3>
+                <p class="card-subtitle">Things that need your attention</p>
+            </div>
+            <a href="/notifications.php" class="btn btn-secondary btn-sm">View all &rarr;</a>
+        </div>
+        <?php foreach (array_slice($myNotifications, 0, 5) as $notif): ?>
+            <div style="padding:10px 16px; border-bottom:1px solid var(--border); font-size:13px; <?= !$notif['is_read'] ? 'background:var(--bg-hover);' : '' ?>">
+                <strong><?= htmlspecialchars($notif['title']) ?></strong><br>
+                <span style="color:var(--text-muted);"> <?= htmlspecialchars($notif['body']) ?></span>
+                <span style="float:right; color:var(--text-muted); font-size:11px;"><?= htmlspecialchars(substr((string)$notif['created_at'], 0, 16)) ?></span>
+            </div>
+        <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($canViewAudit): ?>
+    <div class="card" style="font-size:13px; padding:10px 16px; margin-bottom:24px;">
+        &#9201;&#65039; <strong>Approval aging:</strong> oldest open procurement record has waited <strong><?= $oldestPending !== null && $oldestPending !== false ? (int)$oldestPending : 0 ?> day(s)</strong>
+        &bull; Machine downtime today: <strong><?= (int)$downtimeToday ?> min</strong>
+        &bull; Reject cost to date: <strong><?= formatMoney($rejectCostTotal) ?></strong>
+    </div>
+    <?php endif; ?>
 
     <?php if ($canViewAudit): ?>
     <!-- Live Audit Trail Log (CEO only) -->

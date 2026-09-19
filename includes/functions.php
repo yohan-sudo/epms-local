@@ -55,14 +55,32 @@ function decryptPassword(string $blob): ?string {
 }
 
 /**
- * Appends an immutable record into the audit_logs table.
+ * Appends a tamper-evident record into the audit_logs table.
+ *
+ * v2.2 sealing: each row stores a SHA-256 hash of (previous row hash + this
+ * row's content). Editing or deleting any historical row breaks every hash
+ * that follows it, so tampering becomes detectable. The actor's IP address
+ * and user agent are recorded for forensic tracing.
  */
 function logAudit(PDO $db, string $action, string $entityType, string|int $entityId, string $details): void {
     $actorId = $_SESSION['user_id'] ?? null;
+    $ip      = $_SERVER['REMOTE_ADDR'] ?? '';
+    $agent   = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+    $ts      = date('Y-m-d H:i:s');
+
+    try {
+        $prev = $db->query('SELECT row_hash FROM audit_logs ORDER BY id DESC LIMIT 1')->fetchColumn();
+    } catch (Exception $e) {
+        $prev = false;
+    }
+    $prevHash = ($prev !== false && $prev !== null) ? (string)$prev : str_repeat('0', 64);
+
+    $payload = $prevHash . '|' . $ts . '|' . ($actorId ?? 'system') . '|' . $action . '|' . $entityType . '|' . $entityId . '|' . $details;
+    $rowHash = hash('sha256', $payload);
 
     $stmt = $db->prepare("
-        INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, details, timestamp)
-        VALUES (:actor_id, :action, :entity_type, :entity_id, :details, CURRENT_TIMESTAMP)
+        INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, details, timestamp, ip_address, user_agent, prev_hash, row_hash)
+        VALUES (:actor_id, :action, :entity_type, :entity_id, :details, :ts, :ip, :agent, :prev, :row)
     ");
     $stmt->execute([
         ':actor_id'    => $actorId,
@@ -70,7 +88,155 @@ function logAudit(PDO $db, string $action, string $entityType, string|int $entit
         ':entity_type' => $entityType,
         ':entity_id'   => (string)$entityId,
         ':details'     => $details,
+        ':ts'          => $ts,
+        ':ip'          => $ip !== '' ? $ip : null,
+        ':agent'       => $agent !== '' ? $agent : null,
+        ':prev'        => $prevHash,
+        ':row'         => $rowHash,
     ]);
+
+    // Same-event notifications fire from notifyRoles(); logAudit stays pure.
+}
+
+/**
+ * Verifies the audit hash chain. Rows written before sealing (both hashes
+ * NULL) count as legacy history: they are skipped until the first sealed
+ * row, after which the chain must hold without a break. A break means some
+ * entry after sealing was edited or deleted.
+ * Returns [ok(bool), firstBrokenId(int|null), checked(int), sealed(int)].
+ */
+function verifyAuditChain(PDO $db): array {
+    try {
+        $rows = $db->query('SELECT id, actor_id, action, entity_type, entity_id, details, timestamp, prev_hash, row_hash FROM audit_logs ORDER BY id ASC')->fetchAll();
+    } catch (Exception $e) {
+        return [true, null, 0, 0];
+    }
+    $expectedPrev = str_repeat('0', 64);
+    $sealed = 0;
+    foreach ($rows as $r) {
+        $isLegacy = ($r['prev_hash'] === null && $r['row_hash'] === null);
+        if ($isLegacy) {
+            continue; // pre-sealing history: no hashes to verify
+        }
+        $sealed++;
+        $payload = $expectedPrev . '|' . $r['timestamp'] . '|' . ($r['actor_id'] ?? 'system') . '|' . $r['action'] . '|' . $r['entity_type'] . '|' . $r['entity_id'] . '|' . $r['details'];
+        if (!hash_equals($expectedPrev, (string)$r['prev_hash']) || !hash_equals(hash('sha256', $payload), (string)$r['row_hash'])) {
+            return [false, (int)$r['id'], count($rows), $sealed];
+        }
+        $expectedPrev = (string)$r['row_hash'];
+    }
+    return [true, null, count($rows), $sealed];
+}
+
+/**
+ * In-app notification (the alert bell). Never throws: notification failure
+ * must not break the business action that triggered it.
+ */
+function notifyUser(PDO $db, int $userId, string $title, string $body, string $link = ''): void {
+    try {
+        $stmt = $db->prepare('INSERT INTO notifications (user_id, title, body, link) VALUES (:u, :t, :b, :l)');
+        $stmt->execute([':u' => $userId, ':t' => mb_substr($title, 0, 120), ':b' => mb_substr($body, 0, 400), ':l' => $link]);
+    } catch (Exception $e) {
+        // cosmetic only
+    }
+}
+
+/** Notify every active user holding any of the given roles (optionally excluding one user). */
+function notifyRoles(PDO $db, array $roles, string $title, string $body, string $link = '', ?int $exceptUserId = null): void {
+    try {
+        $placeholders = implode(', ', array_map(static fn ($i) => ':r' . $i, array_keys($roles)));
+        $sql = "SELECT id FROM users WHERE status = 'Active' AND role IN ({$placeholders})";
+        if ($exceptUserId !== null) {
+            $sql .= ' AND id != :except';
+        }
+        $stmt = $db->prepare($sql);
+        foreach ($roles as $i => $r) {
+            $stmt->bindValue(':r' . $i, $r);
+        }
+        if ($exceptUserId !== null) {
+            $stmt->bindValue(':except', $exceptUserId, PDO::PARAM_INT);
+        }
+        $stmt->execute();
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $uid) {
+            notifyUser($db, (int)$uid, $title, $body, $link);
+        }
+    } catch (Exception $e) {
+        // cosmetic only
+    }
+}
+
+/** Unread notification count for the header bell. */
+function unreadNotificationCount(PDO $db, int $userId): int {
+    try {
+        $stmt = $db->prepare('SELECT COUNT(*) FROM notifications WHERE user_id = :u AND is_read = 0');
+        $stmt->execute([':u' => $userId]);
+        return (int)$stmt->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+/**
+ * Effective role: the user's own role, or the role they are ACTING FOR via
+ * an approved delegation covering today. A user can hold at most one active
+ * delegation, and the delegate system enforces the single-holder rule for
+ * the Accountant (petty cash) - a substitute steps in only while the
+ * Accountant is marked away, never in parallel.
+ */
+function effectiveRole(PDO $db): string {
+    $own = $_SESSION['user_role'] ?? 'Guest';
+    if ($own !== 'Manager' || empty($_SESSION['user_id'])) {
+        return $own;
+    }
+    // Manager may be acting as Accountant (or vice versa) via delegation.
+    try {
+        $stmt = $db->prepare("
+            SELECT d.role_scope, u.status AS from_status
+            FROM delegations d
+            JOIN users u ON d.from_user_id = u.id
+            WHERE d.to_user_id = :me
+              AND d.date_from <= CURRENT_DATE AND d.date_to >= CURRENT_DATE
+            ORDER BY d.id DESC
+            LIMIT 1
+        ");
+        $stmt->execute([':me' => (int)$_SESSION['user_id']]);
+        $row = $stmt->fetch();
+        // Only valid while the granting user is still Active and holds the role
+        if ($row && $row['from_status'] === 'Active' && in_array($row['role_scope'], ['Accountant', 'Manager'], true)) {
+            $_SESSION['acting_as'] = $row['role_scope'];
+            return $row['role_scope'];
+        }
+    } catch (Exception $e) {
+        // fall through
+    }
+    unset($_SESSION['acting_as']);
+    return $own;
+}
+
+/** Setting read/write helper (app_settings key/value). */
+function getSetting(PDO $db, string $key, string $default = ''): string {
+    try {
+        $stmt = $db->prepare('SELECT svalue FROM app_settings WHERE skey = :k');
+        $stmt->execute([':k' => $key]);
+        $v = $stmt->fetchColumn();
+        return $v === false ? $default : (string)$v;
+    } catch (Exception $e) {
+        return $default;
+    }
+}
+
+function setSetting(PDO $db, string $key, string $value): void {
+    try {
+        if (defined('DB_DRIVER') && DB_DRIVER === 'mysql') {
+            $stmt = $db->prepare('INSERT INTO app_settings (skey, svalue) VALUES (:k, :v) ON DUPLICATE KEY UPDATE svalue = :v2');
+            $stmt->execute([':k' => $key, ':v' => $value, ':v2' => $value]);
+        } else {
+            $stmt = $db->prepare('INSERT INTO app_settings (skey, svalue) VALUES (:k, :v) ON CONFLICT(skey) DO UPDATE SET svalue = :v2');
+            $stmt->execute([':k' => $key, ':v' => $value, ':v2' => $value]);
+        }
+    } catch (Exception $e) {
+        // ignore
+    }
 }
 
 /**

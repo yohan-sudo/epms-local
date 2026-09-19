@@ -183,18 +183,29 @@
     }
     var fullName = form.querySelector('input[name="name"]');
     if (fullName) {
-      fullName.setAttribute('pattern', "[A-Z0-9 .'\\-]+");
-      fullName.setAttribute('data-pattern-error', 'Full name must use CAPITAL LETTERS (letters, spaces, apostrophes, hyphens and dots only).');
+      fullName.setAttribute('pattern', "[A-Z .'\\-]+");
+      fullName.setAttribute('data-pattern-error', 'Full name must use CAPITAL LETTERS only - no numbers or other characters.');
       fullName.addEventListener('input', function () {
         var pos = this.selectionStart;
         this.value = this.value.toUpperCase();
         try { this.setSelectionRange(pos, pos); } catch (e) { /* not fatal */ }
       });
     }
+    /* Password RULES depend on the form's purpose:
+     *   - new/set/change forms: 12-64 characters, no spaces
+     *   - the LOGIN form: any non-empty password (existing accounts may
+     *     still have short passwords; the server verifies the real one)
+     */
+    var isNewPasswordForm = !!(form.querySelector('input[name="new_password"]')
+      || form.action.indexOf('users.php') !== -1
+      || form.action.indexOf('change_password.php') !== -1);
     var newPassword = form.querySelector('input[name="new_password"], input[name="password"]');
-    if (newPassword) {
-      newPassword.setAttribute('pattern', '\\S{6,64}');
-      newPassword.setAttribute('data-pattern-error', '6-64 characters, no spaces.');
+    if (newPassword && isNewPasswordForm) {
+      newPassword.setAttribute('pattern', '\\S{12,64}');
+      newPassword.setAttribute('data-pattern-error', '12-64 characters, no spaces.');
+      newPassword.setAttribute('data-required-error', 'Password is required.');
+    } else if (newPassword) {
+      newPassword.removeAttribute('pattern');
       newPassword.setAttribute('data-required-error', 'Password is required.');
     }
 

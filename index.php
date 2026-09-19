@@ -2,16 +2,26 @@
 /**
  * U EPMS - Authentication & Role Access Gateway
  * Plain PHP, Plain HTML5, Plain CSS3 (Zero Frameworks)
+ *
+ * v2.2 hardening:
+ *   - Lockout: 5 failed attempts pauses the account for 15 minutes
+ *   - Session ID regenerated at every login (fixation defense)
+ *   - Accounts flagged must_change_password are routed to the change page
+ *   - Every failed attempt is logged with its source address
  */
 require_once __DIR__ . '/includes/session.php';
 initAppSession();
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/functions.php';
 
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MINUTES    = 15;
+
 // Handle Username/Password Login
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'])) {
     $username = trim((string)($_POST['username'] ?? ''));
     $password = (string)($_POST['password'] ?? '');
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? '';
 
     $loginErrors = [];
     if ($username === '' || $password === '') {
@@ -30,22 +40,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'])) {
     $stmt->execute([':u' => $username]);
     $user = $stmt->fetch();
 
+    // ---- Lockout gate: no password check while the account is paused ----
+    if ($user && !empty($user['locked_until']) && strtotime((string)$user['locked_until']) > time()) {
+        $mins = (int)ceil((strtotime((string)$user['locked_until']) - time()) / 60);
+        setFlash('error', "Account locked for {$mins} more minute(s) after repeated failed sign-ins. Try again shortly.");
+        commitSessionAndRedirect('/index.php');
+    }
+
     if ($user && ($user['status'] === 'Banned')) {
+        logAudit($db, 'LOGIN_BLOCKED_BANNED', 'AUTH', $user['id'], "Blocked sign-in for banned account '{$user['name']}' from {$clientIp}");
         setFlash('error', "Account Suspended: Access denied for {$user['name']}. Contact the CEO.");
         commitSessionAndRedirect('/index.php');
     }
 
     if ($user && password_verify($password, $user['password_hash'])) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['user_name'] = $user['name'];
+        // Success: reset failure counter, clear any lockout
+        try {
+            $db->prepare("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = :id")
+               ->execute([':id' => $user['id']]);
+        } catch (Exception $e) {
+            // non-fatal
+        }
+
+        // Fixation defense: brand-new session ID for an authenticated session
+        session_regenerate_id(true);
+
+        $_SESSION['user_id']     = $user['id'];
+        $_SESSION['user_name']   = $user['name'];
         $_SESSION['user_username'] = $user['username'];
-        $_SESSION['user_role'] = $user['role'];
+        $_SESSION['user_role']   = $user['role'];
         $_SESSION['user_status'] = $user['status'];
 
         logAudit($db, 'USER_LOGIN', 'AUTH', $user['id'], "User {$user['name']} authenticated via credentials");
+
+        // Forced password change: temporary / first-login passwords
+        if (!empty($user['must_change_password'])) {
+            $_SESSION['pending_password_change'] = true;
+            commitSessionAndRedirect('/change_password.php');
+        }
+
         $destination = ($user['role'] === 'Procurement Officer') ? '/procurement.php' : '/dashboard.php';
         commitSessionAndRedirect($destination);
     } else {
+        // Failure: count it, lock at the threshold, log it
+        if ($user) {
+            $attempts = (int)$user['failed_attempts'] + 1;
+            $lockUntil = $attempts >= MAX_LOGIN_ATTEMPTS
+                ? date('Y-m-d H:i:s', time() + LOCKOUT_MINUTES * 60)
+                : null;
+            try {
+                $upd = $db->prepare("UPDATE users SET failed_attempts = :a, locked_until = :lu WHERE id = :id");
+                $upd->execute([':a' => $attempts, ':lu' => $lockUntil, ':id' => $user['id']]);
+            } catch (Exception $e) {
+                // non-fatal
+            }
+            if ($lockUntil) {
+                logAudit($db, 'LOGIN_LOCKED', 'AUTH', $user['id'], "Account '{$user['name']}' locked for " . LOCKOUT_MINUTES . " minutes after {$attempts} failed attempts (from {$clientIp})");
+                setFlash('error', 'Too many failed attempts. The account is locked for ' . LOCKOUT_MINUTES . ' minutes.');
+                commitSessionAndRedirect('/index.php');
+            }
+        }
         setFlash('error', "Invalid username or password.");
         commitSessionAndRedirect('/index.php');
     }
@@ -113,48 +167,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'])) {
             </button>
         </form>
 
-        <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color); font-size: 11.5px; color: var(--text-subtle); line-height: 1.6;">
-            <strong>Enterprise Plant Monitoring System</strong><br>
-            Manage production, procurement records, and petty cash. All monetary values are recorded in Tanzanian Shillings (<?= APP_CURRENCY ?>).
-        </div>
     </div>
 </div>
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const sid = urlParams.get('sid') || localStorage.getItem('factory_sid');
-    if (sid) {
-        localStorage.setItem('factory_sid', sid);
-        document.querySelectorAll('form').forEach(function(form) {
-            if (!form.querySelector('input[name="sid"]')) {
-                const hidden = document.createElement('input');
-                hidden.type = 'hidden';
-                hidden.name = 'sid';
-                hidden.value = sid;
-                form.appendChild(hidden);
-            }
-        });
-    }
-
-    // Interactive button loading state for instant visual feedback
-    // (only when the shared validation engine passes the form)
-    document.querySelectorAll('form').forEach(function(form) {
-        form.addEventListener('submit', function(e) {
-            if (e.defaultPrevented) return;
-            if (typeof window.uepmsFormValid === 'function' && !window.uepmsFormValid(form)) {
-                e.preventDefault();
-                return;
-            }
-            const btn = form.querySelector('button[type="submit"]');
-            if (btn) {
-                btn.style.opacity = '0.7';
-                btn.style.pointerEvents = 'none';
-                btn.innerText = 'Signing in...';
-            }
-        });
-    });
-});
-</script>
 </body>
 </html>
+

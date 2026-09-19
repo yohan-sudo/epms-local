@@ -77,6 +77,9 @@ $logs = $stmtLogs->fetchAll();
 // Distinct entities for filter
 $entities = $db->query("SELECT DISTINCT entity_type FROM audit_logs ORDER BY entity_type ASC")->fetchAll(PDO::FETCH_COLUMN);
 
+// v2.2: tamper-evidence check - re-walk the hash chain
+[$chainOk, $chainBrokenAt, $chainChecked, $chainSealed] = verifyAuditChain($db);
+
 include __DIR__ . '/components/header.php';
 ?>
 
@@ -93,6 +96,16 @@ include __DIR__ . '/components/header.php';
     </div>
 
     <?php displayFlash(); ?>
+
+    <?php if ($chainOk): ?>
+        <div class="card alert-success" style="padding:10px 16px; margin-bottom:16px; font-size:13px;">
+            &#128274; <strong>Chain verified:</strong> <?= $chainSealed ?> sealed entries intact (plus <?= ($chainChecked - $chainSealed) ?> legacy entries from before sealing) - no tampering detected.
+        </div>
+    <?php else: ?>
+        <div class="card alert-danger" style="padding:10px 16px; margin-bottom:16px; font-size:13px;">
+            &#9888;&#65039; <strong>TAMPERING DETECTED:</strong> the audit chain breaks at entry #<?= $chainBrokenAt ?> (of <?= $chainChecked ?> checked). Entries from that point on have been altered or removed. Investigate immediately.
+        </div>
+    <?php endif; ?>
 
     <?php render_filter_bar([
         'action'       => '/audit_logs.php',
@@ -152,7 +165,13 @@ include __DIR__ . '/components/header.php';
                                 <td class="mono" style="font-size:12px; white-space:nowrap;">
                                     <span class="badge badge-info"><?= htmlspecialchars($log['entity_type']) ?> #<?= htmlspecialchars($log['entity_id']) ?></span>
                                 </td>
-                                <td style="font-size:13px; max-width:400px;"><?= htmlspecialchars($log['details']) ?></td>
+                                <td style="font-size:13px; max-width:400px;">
+                                    <?= htmlspecialchars($log['details']) ?>
+                                    <div style="font-size:11px; color:var(--text-subtle); margin-top:2px;">
+                                        From <?= htmlspecialchars($log['ip_address'] ?? 'unknown') ?>
+                                        &bull; seal <span class="mono" title="SHA-256 chain hash"><?= htmlspecialchars(substr((string)($log['row_hash'] ?? ''), 0, 10)) ?></span>
+                                    </div>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                     <?php endif; ?>

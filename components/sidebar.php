@@ -20,6 +20,19 @@ $currentUserName  = $_SESSION['user_name'] ?? 'Guest User';
 $currentUserInitial = strtoupper(mb_substr($currentUserName, 0, 1));
 $activeNav = $activeNav ?? 'dashboard';
 $isPo = $currentUserRole === 'Procurement Officer';
+$isSupervisor = $currentUserRole === 'Supervisor';
+$isAssistant = $currentUserRole === 'Assistant Manager';
+$isAccountant = $currentUserRole === 'Accountant';
+
+// Unread notifications badge (bell) - every authenticated role
+$notifCount = 0;
+try {
+    $stmtN = $db->prepare('SELECT COUNT(*) FROM notifications WHERE user_id = :u AND is_read = 0');
+    $stmtN->execute([':u' => (int)$_SESSION['user_id'] ?? 0]);
+    $notifCount = (int)$stmtN->fetchColumn();
+} catch (Exception $e) {
+    $notifCount = 0;
+}
 
 // Live badge counts (fail silently if the DB hiccups)
 // The procurement badge shows what is awaiting THE CURRENT USER's stage:
@@ -46,7 +59,7 @@ if (isset($db) && $db) {
                 "SELECT COUNT(*) FROM procurement_entries WHERE status NOT IN ('Finalized', 'Rejected')"
             )->fetchColumn();
         }
-        if (!$isPo) {
+        if (!$isPo && !$isAssistant) {
             $openFloatCount = (int)$db->query(
                 "SELECT COUNT(*) FROM petty_cash_issuances WHERE status = 'Active'"
             )->fetchColumn();
@@ -126,11 +139,34 @@ function more_row(string $href, string $icon, string $label, string $key, string
 
     <nav class="sidebar-nav">
         <?php if ($isPo): ?>
-        <!-- Procurement Officer: submission portal + reports -->
+        <!-- Procurement Officer: procurement + inventory + shipments + cash requests -->
         <div class="nav-section-title"><span class="nav-text">Procurement</span></div>
         <ul class="nav-list">
             <?php nav_item('/procurement.php', '&#128722;', 'Procurement Records', 'procurement', $activeNav, $pendingPoCount); ?>
+            <?php nav_item('/inventory.php', '&#128230;', 'Inventory', 'inventory', $activeNav); ?>
+            <?php nav_item('/shipments.php', '&#128666;', 'Shipments', 'shipments', $activeNav); ?>
+            <?php nav_item('/cash_requests.php', '&#128176;', 'Cash Requests', 'cash_requests', $activeNav); ?>
+        </ul>
+
+        <div class="nav-section-title"><span class="nav-text">Insights</span></div>
+        <ul class="nav-list">
             <?php nav_item('/reports.php', '&#128202;', 'Reports', 'reports', $activeNav); ?>
+            <?php nav_item('/notifications.php', '&#128276;', 'Notifications', 'notifications', $activeNav, $notifCount); ?>
+        </ul>
+        <?php elseif ($isSupervisor): ?>
+        <!-- Supervisor: production floor work -->
+        <div class="nav-section-title"><span class="nav-text">Factory Floor</span></div>
+        <ul class="nav-list">
+            <?php nav_item('/production.php', '&#9881;', 'Production & Electricity', 'production', $activeNav); ?>
+            <?php nav_item('/inventory.php', '&#128230;', 'Material Requests', 'inventory', $activeNav); ?>
+            <?php nav_item('/floor.php', '&#127970;', 'Floor View', 'floor', $activeNav); ?>
+        </ul>
+
+        <div class="nav-section-title"><span class="nav-text">More</span></div>
+        <ul class="nav-list">
+            <?php nav_item('/corrections.php', '&#9999;', 'Corrections', 'corrections', $activeNav); ?>
+            <?php nav_item('/reports.php', '&#128202;', 'Reports', 'reports', $activeNav); ?>
+            <?php nav_item('/notifications.php', '&#128276;', 'Notifications', 'notifications', $activeNav, $notifCount); ?>
         </ul>
         <?php else: ?>
 
@@ -142,19 +178,41 @@ function more_row(string $href, string $icon, string $label, string $key, string
         <div class="nav-section-title"><span class="nav-text">Operations</span></div>
         <ul class="nav-list">
             <?php nav_item('/procurement.php', '&#128722;', 'Procurement Records', 'procurement', $activeNav, $pendingPoCount); ?>
-            <?php nav_item('/production.php', '&#9881;', 'Production Shifts', 'production', $activeNav); ?>
+            <?php if (!$isAccountant): ?><?php nav_item('/production.php', '&#9881;', 'Production Shifts', 'production', $activeNav); ?><?php endif; ?>
+            <?php if (!$isAssistant): ?><?php nav_item('/shipments.php', '&#128666;', 'Shipments', 'shipments', $activeNav); ?><?php endif; ?>
+            <?php if (!$isAssistant): ?><?php nav_item('/cash_requests.php', '&#128176;', 'Cash Requests', 'cash_requests', $activeNav); ?><?php endif; ?>
+            <?php if (!$isAccountant): ?><?php nav_item('/inventory.php', '&#128230;', 'Inventory', 'inventory', $activeNav); ?><?php endif; ?>
+            <?php if (!$isAccountant && !$isAssistant): ?><?php nav_item('/stores.php', '&#128230;', 'Materials Store', 'stores', $activeNav); ?><?php endif; ?>
+            <?php if (!$isAssistant): ?><?php nav_item('/dispatch.php', '&#128666;', 'Sales & Dispatch', 'dispatch', $activeNav); ?><?php endif; ?>
+        </ul>
+
+        <?php if (!$isAccountant): ?>
+        <div class="nav-section-title"><span class="nav-text">Petty Cash</span></div>
+        <ul class="nav-list">
             <?php nav_item('/petty_cash.php', '&#128181;', 'Petty Cash', 'petty_cash', $activeNav, $openFloatCount); ?>
         </ul>
+        <?php endif; ?>
 
         <div class="nav-section-title"><span class="nav-text">Insights</span></div>
         <ul class="nav-list">
             <?php nav_item('/reports.php', '&#128202;', 'Reports & Documents', 'reports', $activeNav); ?>
+            <?php nav_item('/notifications.php', '&#128276;', 'Notifications', 'notifications', $activeNav, $notifCount); ?>
+            <?php nav_item('/corrections.php', '&#9999;', 'Corrections', 'corrections', $activeNav); ?>
         </ul>
+
+        <?php if (in_array($currentUserRole, ['CEO', 'Manager', 'Accountant'], true)): ?>
+        <div class="nav-section-title"><span class="nav-text">Coordination</span></div>
+        <ul class="nav-list">
+            <?php nav_item('/delegations.php', '&#129309;', 'Delegations', 'delegations', $activeNav); ?>
+            <?php if ($currentUserRole === 'Manager'): ?><?php nav_item('/workers.php', '&#128101;', 'Workers & Attendance', 'workers', $activeNav); ?><?php endif; ?>
+        </ul>
+        <?php endif; ?>
 
         <?php if ($currentUserRole === 'CEO'): ?>
         <div class="nav-section-title"><span class="nav-text">Administration</span></div>
         <ul class="nav-list">
             <?php nav_item('/users.php', '&#128101;', 'User Management', 'users', $activeNav); ?>
+            <?php nav_item('/workers.php', '&#129516;', 'Workers & Attendance', 'workers', $activeNav); ?>
             <?php nav_item('/settings.php', '&#9874;', 'Machinery Config', 'settings', $activeNav); ?>
             <?php nav_item('/audit_logs.php', '&#128220;', 'Audit Trail', 'audit_logs', $activeNav); ?>
         </ul>
@@ -205,6 +263,9 @@ $moreActive  = in_array($activeNav, $moreKeys, true);
             <?php tab_item('/procurement.php', '&#128722;', 'Records', 'procurement', $activeNav, $pendingPoCount); ?>
             <?php tab_item('/production.php', '&#9881;', 'Production', 'production', $activeNav); ?>
             <?php tab_item('/petty_cash.php', '&#128181;', 'Petty Cash', 'petty_cash', $activeNav, $openFloatCount); ?>
+            <?php if (!$isPo): ?>
+                <?php tab_item('/stores.php', '&#128230;', 'Store', 'stores', $activeNav); ?>
+            <?php endif; ?>
         <?php endif; ?>
 
     <button type="button" class="tab-item tab-more-btn<?= $moreActive ? ' active' : '' ?>" id="tab-more-btn" aria-haspopup="true" aria-expanded="false">

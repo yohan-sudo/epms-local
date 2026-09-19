@@ -57,6 +57,10 @@ date_default_timezone_set(APP_TIMEZONE);
 // Reporting currency - Tanzanian Shillings (TZS) across the whole system
 define('APP_CURRENCY', 'TZS');
 
+// Friendly error handling: unexpected errors show a calm page and log
+// privately to logs/error.log (registered before anything can fail).
+require_once __DIR__ . '/includes/error_handler.php';
+
 // ---------------------------------------------------------------------
 // 3. Database Connection Parameters (localhost by default)
 // ---------------------------------------------------------------------
