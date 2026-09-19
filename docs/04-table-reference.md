@@ -1,6 +1,6 @@
 # 04 — Table Reference & Relations
 
-> Column-for-column reference for the **30 tables** in the live schema, extracted from the
+> Column-for-column reference for the **31 tables** in the live schema, extracted from the
 > deployed database (`SHOW COLUMNS` on `factory_db`; the identical schema is created on SQLite
 > by `includes/migrations.php`). The 9 original tables are marked ⭕, the v2.3 tables 🆕.
 
@@ -38,6 +38,7 @@
 | 28 | 🆕 `dispatches` | Sales dispatch ledger | Manager/CEO |
 | 29 | 🆕 `delegations` | Deputy coverage windows | CEO |
 | 30 | 🆕 `attachments` | File attachments on records | any role (scoped) |
+| 31 | 🆕 `webauthn_credentials` | Public keys for worker fingerprint/face enrolment | device + verifier |
 
 Plus `app_settings` (key-value configuration store).
 
@@ -259,6 +260,8 @@ Approval and dispatch happen in one step (Manager) and deduct finished stock.
 
 **`attachments`**: entity_type · entity_id · file_name · stored_name · mime_type · size_bytes · uploaded_by **FK** · created_at.
 
+**`webauthn_credentials`**: worker_id **FK → workers.id** · credential_id **UNI** (binary) · public_key (PEM) · format · aaguid · sign_count (clone detector) · enrolled_by **FK** · created_at. One row per enrolled authenticator; check-in signatures are verified against the stored public key via `api_webauthn.php`.
+
 **`app_settings`**: skey **UNI** · svalue.
 
 ---
@@ -290,7 +293,7 @@ inventory_items → inventory_transactions.item_id, inventory_requests.item_id,
                   shipment_orders.product_item_id, stock_issues (issued_to_process)
 petty_cash_issuances → petty_cash_expenses.issuance_id
 customers → dispatches.customer_id
-workers → worker_attendance.worker_id
+workers → worker_attendance.worker_id, webauthn_credentials.worker_id
 ```
 
 *(All foreign keys are indexed; verified against the live schema.)*

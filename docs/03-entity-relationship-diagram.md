@@ -1,6 +1,6 @@
 # 03 — Entity-Relationship Diagram (ERD)
 
-> Generated from the **live** schema (30 tables, MySQL `factory_db` / SQLite dual-driver).
+> Generated from the **live** schema (31 tables, MySQL `factory_db` / SQLite dual-driver).
 > Notation: `||` exactly one, `o|` zero-or-one, `o{` zero-or-more.
 
 ## 1. Full ERD — every relationship
@@ -52,6 +52,7 @@ erDiagram
     customers ||--o{ dispatches : "buys"
 
     workers ||--o{ worker_attendance : "checks in"
+    workers ||--o{ webauthn_credentials : "enrols authenticators"
 ```
 
 ## 2. ERD with attributes — core entities
